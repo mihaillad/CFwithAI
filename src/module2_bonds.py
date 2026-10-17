@@ -8,7 +8,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
     ofz = pd.read_csv(data_dir / 'bonds_OFZ.csv', sep=';')
     corps = pd.read_csv(data_dir / 'bonds_CORPS.csv', sep=';')
     prices = pd.read_csv(data_dir / 'bond_prices.csv', sep=';')
-    cbr = pd.read_csv(data_dir / 'cbr_rate.csv', sep=';')
+    cbr = pd.read_csv(data_dir / 'risk_free_rate.csv')  # разделитель ','
     
     # T-17: Дубликаты ISIN
     common_isins = set(ofz['ISIN']).intersection(set(corps['ISIN']))

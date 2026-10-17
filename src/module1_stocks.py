@@ -1,10 +1,17 @@
-import pandas as pd
-import numpy as np
-from pathlib import Path
+from __future__ import annotations
+
 import logging
-import requests
+import math
+import os
+import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import requests
+import yaml
 
 # ============================================================================
 # Константы источников данных
@@ -15,6 +22,127 @@ MOEX_PRICES_URL = "http://iss.moex.com/iss/engines/stock/markets/shares/boards/T
 CBR_URL = "http://www.cbr.ru/DailyInfoWebServ/DailyInfo.asmx"
 HTTP_TIMEOUT = 30
 
+
+# ============================================================================
+# Встроенные утилиты (для автономного запуска, без common.py)
+# ============================================================================
+
+DEFAULT_DATA_DIR = Path("data/raw")
+DEFAULT_OUTPUT_DIR = Path("data/output")
+DEFAULT_CONFIG_PATH = Path("config.yaml")
+
+REQUIRED_RAW_FILES = [
+    "stocks_universe.csv",
+    "divs_data.csv",           # может отсутствовать — будет создан из БКС
+    "stock_prices.csv",        # может отсутствовать — будет создан из MOEX
+    "risk_free_rate.csv",      # может отсутствовать — будет создан из ЦБ
+]
+
+# Файлы, отсутствие которых критично (не могут быть получены из внешних источников)
+CRITICAL_RAW_FILES = [
+    "stocks_universe.csv",
+]
+
+
+def setup_logging(date: str, output_dir: Path) -> logging.Logger:
+    """Настраивает логгер: файл output/run_<date>.log + stdout. Режим 'w' — идемпотентность."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_file = output_dir / f"run_{date}.log"
+    logger = logging.getLogger("module1")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger
+
+
+def load_config(config_path: Path) -> dict:
+    """Загружает config.yaml. Если файла нет — возвращает дефолты из ТЗ."""
+    defaults = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "top_n_stocks": 16,
+        "weight_top1_pct": 10.0,
+        "weight_step_pct": 0.5,
+        "stock_sleeve_pct": 65.0,
+        "d_min_days": 5,
+        "min_dy_gross_pct": 5.0,
+        "payout_warn_pct": 90.0,
+        "payout_max_pct": 100.0,
+        "registry_missing_policy": "warn_and_uncertain",
+        "registry_strict_mode": False,
+    }
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        defaults.update(cfg)
+    return defaults
+
+
+def save_csv(df: pd.DataFrame, path: Path, sep: str = ";", float_format: str = "%.4f"):
+    """Сохраняет DataFrame в CSV с разделителем ; и заданной точностью float."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False, sep=sep, encoding="utf-8",
+              float_format=float_format, date_format="%Y-%m-%d")
+
+
+def check_required_files(data_dir: Path, logger: logging.Logger) -> None:
+    """
+    Проверяет наличие критичных входных файлов.
+    - Если stocks_universe.csv отсутствует, загружает его с MOEX ISS.
+    - Если stock_fundamentals.csv отсутствует, создаёт пустой файл с требуемой схемой.
+    Остальные файлы (divs_data, stock_prices, risk_free_rate) получаются из внешних источников.
+    """
+    # 1. Проверка справочника акций
+    universe_path = data_dir / "stocks_universe.csv"
+    if not universe_path.exists():
+        logger.warning("stocks_universe.csv не найден. Загружаю актуальный справочник с MOEX ISS...")
+        fetch_and_save_stocks_universe(data_dir, logger)
+
+    # 2. Проверка и создание stock_fundamentals.csv
+    fund_path = data_dir / "stock_fundamentals.csv"
+    if not fund_path.exists():
+        logger.info("stock_fundamentals.csv не найден. Создаю пустой файл с требуемой схемой...")
+        
+        # Создаем пустой DataFrame с точными именами колонок из ТЗ
+        empty_fund = pd.DataFrame(columns=[
+            "SECID", "report_date", "period", "eps_ttm", "eps_prev_ttm",
+            "eps_3y_ago", "net_income_ttm", "shares_outstanding",
+            "dividend_policy_url", "notes"
+        ])
+        
+        # Явное приведение типов для корректного сохранения и последующего чтения
+        empty_fund = empty_fund.astype({
+            "SECID": str,
+            "report_date": str,       # При чтении будет преобразован в datetime через pd.to_datetime
+            "period": str,
+            "eps_ttm": float,
+            "eps_prev_ttm": float,
+            "eps_3y_ago": float,
+            "net_income_ttm": float,
+            "shares_outstanding": float,
+            "dividend_policy_url": str,
+            "notes": str
+        })
+        
+        save_csv(empty_fund, fund_path)
+        logger.info(f"Пустой {fund_path.name} успешно создан.")
+
+    # 3. Информационное логирование об остальных опциональных файлах
+    optional = [
+        "divs_data.csv", 
+        "stock_prices.csv", 
+        "risk_free_rate.csv", 
+        "special_dividends_registry.csv"
+    ]
+    for f in optional:
+        if not (data_dir / f).exists():
+            logger.info(f"Опциональный файл отсутствует: {f} (будет получен из внешнего источника или пропущен)")
+                        
+            
 # ============================================================================
 # Загрузка данных из внешних источников (по аналогии с dividend_rating.py)
 # ============================================================================
@@ -64,10 +192,11 @@ def update_divs_data(divs_path: Path, bcs_df: pd.DataFrame, today: pd.Timestamp)
     Обновляет divs_data.csv:
     - из старого файла оставляем только записи <= today (история фактов);
     - будущие записи из old удаляем (могли быть устаревшими прогнозами);
-    - добавляем свежие данные из БКС (и факты, и будущие анонсы).
+    - добавляем свежие данные из БКС;
+    - сохраняем результат с разделителем ';' согласно ТЗ §0.4.
     """
     if divs_path.exists():
-        old = pd.read_csv(divs_path)
+        old = pd.read_csv(divs_path, sep=';')
         old['close_date'] = pd.to_datetime(old['close_date'])
         old['div_sum'] = pd.to_numeric(old['div_sum'], errors='coerce')
         old = old.dropna(subset=['SECID', 'close_date', 'div_sum'])
@@ -82,6 +211,10 @@ def update_divs_data(divs_path: Path, bcs_df: pd.DataFrame, today: pd.Timestamp)
         subset=['SECID', 'close_date'], keep='last'
     )
     merged = merged.sort_values(['SECID', 'close_date']).reset_index(drop=True)
+    
+    # Сохраняем с единым стандартом проекта
+    save_csv(merged, divs_path, sep=";", float_format="%.9f")
+    
     return merged
 
 
@@ -168,6 +301,61 @@ def fetch_cbr_rate() -> pd.DataFrame:
     return pd.DataFrame(rows).drop_duplicates('date').sort_values('date')
 
 
+def fetch_and_save_stocks_universe(data_dir: Path, logger: logging.Logger) -> None:
+    """
+    Загружает актуальный справочник акций с Мосбиржи (ISS) и сохраняет в stocks_universe.csv.
+    Если для одного SECID есть несколько досок (BOARDID), выбирается та, у которой выше
+    уровень листинга (LISTLEVEL), а при равенстве — первая по алфавиту.
+    """
+    url = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json"
+    params = {
+        "iss.meta": "off",
+        "securities.columns": "SECID,SHORTNAME,LATNAME,LOTSIZE,ISIN,LISTLEVEL,BOARDID"
+    }
+    try:
+        r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        logger.error(f"Не удалось загрузить справочник акций с MOEX ISS: {e}")
+        raise RuntimeError(f"Ошибка загрузки stocks_universe: {e}")
+
+    if "securities" not in payload or "data" not in payload["securities"]:
+        raise RuntimeError("Некорректный ответ MOEX ISS: нет блока securities.data")
+
+    cols = payload["securities"]["columns"]
+    data = payload["securities"]["data"]
+    df = pd.DataFrame(data, columns=cols)
+
+    # Приведение типов
+    df["LOTSIZE"] = pd.to_numeric(df["LOTSIZE"], errors="coerce").fillna(1).astype(int)
+    df["LISTLEVEL"] = pd.to_numeric(df["LISTLEVEL"], errors="coerce").fillna(-1)
+
+    # Сортировка для выбора приоритетной доски: выше уровень листинга, затем алфавитный порядок BOARDID
+    df = df.sort_values(by=["LISTLEVEL", "BOARDID"], ascending=[False, True])
+
+    # Оставляем по одной записи на SECID (приоритетная доска)
+    df_unique = df.drop_duplicates(subset=["SECID"], keep="first").copy()
+
+    # Формирование итоговых колонок согласно ТЗ (§1.2)
+    # Примечание: MOEX ISS в массовом эндпоинте не отдаёт чистое название юрлица (issuer),
+    # поэтому используем SHORTNAME. Поле sector справочное и не является фильтром.
+    result = pd.DataFrame({
+        "SECID": df_unique["SECID"],
+        "issuer": df_unique["SHORTNAME"],
+        "name": df_unique["SHORTNAME"],
+        "sector": "Unknown",
+        "LOTSIZE": df_unique["LOTSIZE"],
+        "board": df_unique["BOARDID"],
+        "lot_as_of": datetime.now().strftime("%Y-%m-%d")
+    })
+
+    result = result.sort_values("SECID").reset_index(drop=True)
+    out_path = data_dir / "stocks_universe.csv"
+    save_csv(result, out_path)
+    logger.info(f"Справочник акций обновлён: {len(result)} тикеров сохранено в {out_path.name}")
+    
+    
 # ============================================================================
 # Основная функция модуля
 # ============================================================================
@@ -175,6 +363,7 @@ def fetch_cbr_rate() -> pd.DataFrame:
 def rank_stocks(date: str, config: dict, data_dir: Path,
                 logger: logging.Logger, diagnostics: list):
     date_dt = pd.to_datetime(date)
+    check_required_files(data_dir, logger)
 
     # ------------------------------------------------------------------
     # Шаг 1. Обновление данных из внешних источников
@@ -192,8 +381,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
 
     divs_path = data_dir / 'divs_data.csv'
     divs_df = update_divs_data(divs_path, bcs_df, date_dt)
-    # Сохраняем divs_data.csv с разделителем ',' (как в исходном формате)
-    divs_df.to_csv(divs_path, index=False, encoding='utf-8')
+    save_csv(divs_df, divs_path, sep=";", float_format="%.9f")
     logger.info(f"divs_data.csv updated: {len(divs_df)} records, "
                 f"{divs_df['SECID'].nunique()} tickers")
 
@@ -264,7 +452,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
 
     for _, row in universe.iterrows():
         secid = row['SECID']
-        lot_size = int(row['lot_size']) if pd.notna(row.get('lot_size')) else 1
+        LOTSIZE = int(row['LOTSIZE']) if pd.notna(row.get('LOTSIZE')) else 1
 
         # 3.1 Проверка цены
         if secid not in latest_prices.index:
@@ -304,8 +492,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
                                         'details': f"SECID {secid}"})
                     # В режиме warn_and_uncertain всё равно исключаем,
                     # т.к. в divs_data нет будущего дивиденда
-            excluded.append({'date': date, 'SECID': secid,
-                             'reason': 'no_dividend',
+            excluded.append({'date': date, 'SECID': secid,'reason': 'no_dividend',
                              'details': 'No future dividends in divs_data'})
             continue
 
@@ -374,7 +561,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
             'eps_growth_3y_pct': eps_3y,
             'stop_flag': stop_flag,
             'stop_reason': ";".join(stop_reasons),
-            'lot_size': lot_size
+            'LOTSIZE': LOTSIZE
         })
 
     # ------------------------------------------------------------------
@@ -382,6 +569,39 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
     # ------------------------------------------------------------------
     df_res = pd.DataFrame(results)
     if not df_res.empty:
+        # ------------------------------------------------------------------
+        # Шаг 3.7. Исключение дубликатов классов (обычка vs преф)
+        # Для пары SECID / SECID+P оставляем бумагу с большей AY;
+        # при равенстве AY — с большей DY_gross (CY).
+        # ------------------------------------------------------------------
+        secs = set(df_res["SECID"])
+        drop = []
+        for s in list(secs):
+            p = s + "P"
+            if p in secs:
+                a = df_res[df_res["SECID"] == s].iloc[0]
+                b = df_res[df_res["SECID"] == p].iloc[0]
+                # Сравниваем пары (ay_pct, dy_gross_pct)
+                drop.append(p if (a["ay_pct"], a["dy_gross_pct"]) >= (b["ay_pct"], b["dy_gross_pct"]) else s)
+
+        if drop:
+            logger.info("обычка и префы: убраны %s", ", ".join(sorted(drop)))
+            # Переносим исключённые бумаги в список excluded
+            for secid in drop:
+                excluded.append({
+                    'date': date,
+                    'SECID': secid,
+                    'reason': 'duplicate_class',
+                    'details': 'Обычка/преф: исключена бумага с меньшей AY/DY'
+                })
+            df_res = df_res[~df_res["SECID"].isin(drop)].copy().reset_index(drop=True)
+
+            # Диагностика
+            diagnostics.append({
+                'code': 'duplicate_class_removed',
+                'details': "; ".join(sorted(drop))
+            })
+
         df_res = df_res.sort_values('ay_pct', ascending=False).reset_index(drop=True)
         df_res['rank'] = df_res.index + 1
 
@@ -402,3 +622,88 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
 
     df_exc = pd.DataFrame(excluded)
     return df_res, df_exc
+
+# ============================================================================
+# Точка входа для изолированного запуска
+# ============================================================================
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI для отладки module1_stocks.py.
+
+    Примеры:
+        python -m src.module1_stocks
+        python src/module1_stocks.py
+        python src/module1_stocks.py --date 2026-10-17
+        python src/module1_stocks.py --config config.yaml --data-dir data/raw
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        description="Module 1: рейтинг акций по дивидендной доходности (изолированный запуск)"
+    )
+    ap.add_argument("--date", default="",
+                    help="Дата расчёта YYYY-MM-DD (по умолчанию — из config.yaml или today)")
+    ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH),
+                    help="Путь к config.yaml")
+    ap.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR),
+                    help="Папка с входными CSV (data/raw)")
+    ap.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR),
+                    help="Папка для выходных CSV (data/output)")
+    ap.add_argument("--update-universe", action="store_true",
+                    help="Принудительно перезагрузить stocks_universe.csv с MOEX ISS")
+    args = ap.parse_args(argv)
+
+    # Корневая директория проекта (от неё строятся относительные пути по умолчанию)
+    project_root = Path(__file__).resolve().parent.parent
+    config_path = (Path(args.config) if Path(args.config).is_absolute()
+                   else project_root / args.config)
+    data_dir = (Path(args.data_dir) if Path(args.data_dir).is_absolute()
+                else project_root / args.data_dir)
+    output_dir = (Path(args.output_dir) if Path(args.output_dir).is_absolute()
+                  else project_root / args.output_dir)
+
+    # Загружаем конфиг, чтобы узнать дату (если не задана через CLI)
+    config = load_config(config_path)
+    date = args.date or config.get("date") or datetime.now().strftime("%Y-%m-%d")
+
+    logger = setup_logging(date, output_dir)
+    if args.update_universe:
+        logger.info("Принудительное обновление справочника акций...")
+        fetch_and_save_stocks_universe(data_dir, logger)
+    logger.info(f"=== Module 1 start: date={date}, data_dir={data_dir}, output_dir={output_dir} ===")
+
+    diagnostics: list[dict] = []
+
+    try:
+        stock_ranking, stock_excluded = rank_stocks(date, config, data_dir, logger, diagnostics)
+
+        save_csv(stock_ranking, output_dir / "stock_ranking.csv")
+        save_csv(stock_excluded, output_dir / "stock_excluded.csv")
+
+        logger.info(f"stock_ranking: {len(stock_ranking)} строк")
+        logger.info(f"stock_excluded: {len(stock_excluded)} строк")
+        if not stock_ranking.empty:
+            top5 = stock_ranking.head(5)[["rank", "SECID", "ay_pct", "dy_gross_pct", "stop_flag"]]
+            logger.info(f"Top-5:\n{top5.to_string(index=False)}")
+
+        # diagnostics
+        if diagnostics:
+            save_csv(pd.DataFrame(diagnostics), output_dir / "diagnostics.csv")
+            logger.info(f"diagnostics: {len(diagnostics)} записей")
+
+        logger.info("=== Module 1 finished successfully ===")
+        return 0
+
+    except FileNotFoundError as e:
+        logger.error(f"Не найден входной файл: {e}")
+        return 2
+    except RuntimeError as e:
+        logger.error(str(e))
+        return 2
+    except Exception as e:
+        logger.exception(f"Непредвиденная ошибка: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

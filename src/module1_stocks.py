@@ -354,7 +354,72 @@ def fetch_and_save_stocks_universe(data_dir: Path, logger: logging.Logger) -> No
     out_path = data_dir / "stocks_universe.csv"
     save_csv(result, out_path)
     logger.info(f"Справочник акций обновлён: {len(result)} тикеров сохранено в {out_path.name}")
-    
+
+def generate_forecast_dividends(divs_df: pd.DataFrame, today: pd.Timestamp, match_days: int = 45) -> pd.DataFrame:
+    """
+    Генерирует прогнозные дивиденды на основе выплат за последние 365 дней.
+    Точная копия логики build_events из dividend_rating.py:
+    - берём фактические выплаты за последние 365 дней;
+    - сдвигаем дату на +365 дней, сумма остаётся той же;
+    - если объявленный дивиденд уже есть в пределах ±match_days, прогноз удаляется;
+    - оставшиеся прогнозы добавляются с dps_source='forecast'.
+    """
+    if divs_df.empty:
+        res = divs_df.copy()
+        if "dps_source" not in res.columns:
+            res["dps_source"] = "declared"
+        return res
+
+    df = divs_df.copy()
+    if "dps_source" not in df.columns:
+        df["dps_source"] = "declared"
+
+    # 1. Фактические выплаты за последние 365 дней
+    hist = df[
+        (df["close_date"] <= today) &
+        (df["close_date"] > today - pd.Timedelta(days=365)) &
+        (df["div_sum"] > 0)
+    ].copy()
+
+    if hist.empty:
+        return df
+
+    # 2. Прогноз: сдвиг даты на +365 дней, та же сумма
+    fc = hist[["SECID", "close_date", "div_sum"]].copy()
+    fc["close_date"] = fc["close_date"] + pd.Timedelta(days=365)
+    fc = fc[fc["close_date"] > today].reset_index(drop=True)
+
+    if fc.empty:
+        return df
+
+    # 3. Исключаем прогнозы, если объявленный дивиденд уже есть вблизи этой даты (± match_days)
+    #    Используем подход из build_events: сохраняем индекс fc, чтобы удалять по нему
+    declared = df[df["close_date"] > today][["SECID", "close_date"]].copy()
+
+    if not declared.empty and not fc.empty:
+        m = fc.reset_index().merge(
+            declared.rename(columns={"close_date": "dec_date"}),
+            on="SECID"
+        )
+        # Находим индексы fc, которые покрыты объявленными дивидендами
+        covered_idx = m.loc[
+            (m["close_date"] - m["dec_date"]).dt.days.abs() <= match_days,
+            "index"
+        ].unique()
+        fc = fc.drop(index=covered_idx)
+
+    fc["dps_source"] = "forecast"
+
+    # 4. Объединяем исходные данные с прогнозом
+    result = pd.concat([df, fc], ignore_index=True)
+
+    # 5. Дедупликация: если на одну дату есть и declared, и forecast, оставляем declared
+    result["source_priority"] = result["dps_source"].map({"declared": 1, "forecast": 2})
+    result = result.sort_values(["SECID", "close_date", "source_priority"]).drop_duplicates(
+        subset=["SECID", "close_date"], keep="first"
+    ).drop(columns=["source_priority"]).reset_index(drop=True)
+
+    return result   
     
 # ============================================================================
 # Основная функция модуля
@@ -436,6 +501,11 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
                      .set_index('SECID'))
 
     divs_df['close_date'] = pd.to_datetime(divs_df['close_date'])
+    
+    # Генерация прогнозов на основе истории за 365 дней (аналог build_events)
+    divs_df = generate_forecast_dividends(divs_df, date_dt, match_days=45)
+    logger.info(f"divs_data после генерации прогнозов: {len(divs_df)} записей, "
+                f"прогнозных: {(divs_df['dps_source'] == 'forecast').sum()}")
 
     # Список SECID, полностью исключённых реестром спецдивидендов
     bad_registry_secids = set()
@@ -444,17 +514,48 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
             registry[registry['classification'].isin(['special', 'uncertain'])]['SECID'].unique()
         )
 
+    
     # ------------------------------------------------------------------
-    # Шаг 3. Расчёт рейтинга по каждой бумаге
+    # Шаг 3. Расчёт рейтинга: обходим только SECID с дивидендами
     # ------------------------------------------------------------------
+    
+    # 3.0 Собираем SECID, у которых есть будущие дивиденды (declared или forecast)
+    future_divs = divs_df[divs_df['close_date'] > date_dt]
+    active_secids = future_divs['SECID'].unique().tolist()
+    logger.info(f"Активных SECID с будущими дивидендами: {len(active_secids)}")
+    
+    # # 3.0.1 Аудит: сколько тикеров из universe не имеют дивидендов
+    # universe_secids = set(universe['SECID'])
+    # without_divs = universe_secids - set(active_secids)
+    # if without_divs:
+    #     logger.info(f"В universe {len(without_divs)} тикеров без дивидендов (пропущены)")
+    #     diagnostics.append({
+    #         'code': 'universe_without_dividends',
+    #         'details': f"count={len(without_divs)}"
+    #     })
+    
+    # # 3.0.2 Проверка: есть ли SECID в divs_data, которых нет в universe
+    # missing_in_universe = set(active_secids) - universe_secids
+    # if missing_in_universe:
+    #     logger.warning(f"SECID в дивидендах, но нет в universe: {len(missing_in_universe)}")
+    #     diagnostics.append({
+    #         'code': 'secid_not_in_universe',
+    #         'details': f"tickers={','.join(sorted(missing_in_universe)[:20])}"
+    #     })
+    
+    # 3.0.3 Создаём быстрый доступ к данным universe по SECID
+    universe_dict = universe.set_index('SECID').to_dict('index')
+    
     results = []
     excluded = []
-
-    for _, row in universe.iterrows():
-        secid = row['SECID']
-        LOTSIZE = int(row['LOTSIZE']) if pd.notna(row.get('LOTSIZE')) else 1
-
-        # 3.1 Проверка цены
+    
+    # 3.1 Обходим ТОЛЬКО SECID с будущими дивидендами
+    for secid in active_secids:
+        # Получаем данные из universe (если есть)
+        uni_row = universe_dict.get(secid, {})
+        lot_size = int(uni_row.get('lot_size', 1)) if uni_row else 1
+        
+        # 3.2 Проверка цены
         if secid not in latest_prices.index:
             excluded.append({'date': date, 'SECID': secid,
                              'reason': 'no_price', 'details': 'No recent price'})
@@ -464,56 +565,51 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
             excluded.append({'date': date, 'SECID': secid,
                              'reason': 'no_price', 'details': 'Price NaN or <= 0'})
             continue
-
-        # 3.2 Исключение по реестру спецдивидендов
+        
+        # 3.3 Исключение по реестру спецдивидендов
         if secid in bad_registry_secids:
             excluded.append({'date': date, 'SECID': secid,
                              'reason': 'registry_missing',
                              'details': 'Excluded by special_dividends_registry'})
             continue
-
-        # 3.3 Поиск ближайшего дивиденда из divs_data.csv
+        
+        # 3.4 Поиск ближайшего дивиденда (теперь гарантированно есть)
         secid_divs = divs_df[divs_df['SECID'] == secid].copy()
+        
+        # Приоритет: declared (1) раньше forecast (2)
+        secid_divs["source_priority"] = secid_divs["dps_source"].map({"declared": 1, "forecast": 2}).fillna(3)
+        secid_divs = secid_divs.sort_values(["close_date", "source_priority"])
+        
         secid_divs = secid_divs.rename(columns={
             'close_date': 'record_date',
             'div_sum': 'amount_per_share'
         })
-
-        future_divs = secid_divs[secid_divs['record_date'] > date_dt]
-        if future_divs.empty:
-            # Fallback по политике (§2.8)
-            if not config.get('registry_strict_mode', False):
-                fund_row = fundamentals[fundamentals['SECID'] == secid]
-                if (not fund_row.empty
-                        and 'dividend_policy_url' in fund_row.columns
-                        and pd.notna(fund_row['dividend_policy_url'].iloc[-1])):
-                    logger.warning(f"policy_fallback for {secid}")
-                    diagnostics.append({'code': 'policy_fallback',
-                                        'details': f"SECID {secid}"})
-                    # В режиме warn_and_uncertain всё равно исключаем,
-                    # т.к. в divs_data нет будущего дивиденда
-            excluded.append({'date': date, 'SECID': secid,'reason': 'no_dividend',
-                             'details': 'No future dividends in divs_data'})
+        
+        future_secid_divs = secid_divs[secid_divs['record_date'] > date_dt]
+        
+        # Этот блок теперь не нужен, т.к. мы обходим только SECID с дивидендами
+        # Но оставим на случай edge cases
+        if future_secid_divs.empty:
             continue
-
-        future_divs = future_divs.sort_values('record_date')
-        next_div = future_divs.iloc[0]
-
+        
+        next_div = future_secid_divs.iloc[0]
+        
         days_to_record = (next_div['record_date'] - date_dt).days
         if days_to_record < config['d_min_days']:
             excluded.append({'date': date, 'SECID': secid,
                              'reason': 'too_close_to_record',
                              'details': f'd={days_to_record}'})
             continue
-
+        
         dps = next_div['amount_per_share']
-
-        # 3.4 Расчёт метрик
+        dps_source = next_div.get('dps_source', 'declared')
+        
+        # 3.5 Расчёт метрик
         ay_pct = ((dps / price) / max(days_to_record, config['d_min_days'])
                   * 365 * 100)
         dy_gross_pct = (dps / price) * 100
-
-        # 3.5 Фундаментальные показатели
+        
+        # 3.6 Фундаментальные показатели
         fund_row = (fundamentals[fundamentals['SECID'] == secid]
                     .sort_values('report_date'))
         eps_ttm = np.nan
@@ -526,8 +622,8 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
             payout_fwd = last_fund.get('payout_fwd_pct', 0.0) or 0.0
             eps_yoy = last_fund.get('eps_growth_yoy_pct', np.nan)
             eps_3y = last_fund.get('eps_growth_3y_pct', np.nan)
-
-        # 3.6 Стоп-лист
+        
+        # 3.7 Стоп-лист
         stop_flag = False
         stop_reasons = []
         if dy_gross_pct < config['min_dy_gross_pct']:
@@ -543,15 +639,15 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
                 and pd.notna(eps_yoy) and eps_yoy < 0):
             stop_flag = True
             stop_reasons.append("payout_warn_no_growth")
-
+        
         results.append({
             'date': date, 'SECID': secid,
-            'name': row.get('name', ''),
-            'issuer': row.get('issuer', ''),
-            'sector': row.get('sector', ''),
+            'dps_source': dps_source,
+           # 'name': uni_row.get('name', ''),
+            # 'issuer': uni_row.get('issuer', ''),
+            # 'sector': uni_row.get('sector', 'Unknown'),
             'price': price,
             'dps_reg_next': dps,
-            'dps_source': 'declared',  # в divs_data все — объявленные
             'record_date': next_div['record_date'].strftime('%Y-%m-%d'),
             'days_to_record': days_to_record,
             'ay_pct': ay_pct,
@@ -561,7 +657,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
             'eps_growth_3y_pct': eps_3y,
             'stop_flag': stop_flag,
             'stop_reason': ";".join(stop_reasons),
-            'LOTSIZE': LOTSIZE
+            'lot_size': lot_size
         })
 
     # ------------------------------------------------------------------
@@ -602,7 +698,16 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
                 'details': "; ".join(sorted(drop))
             })
 
-        df_res = df_res.sort_values('ay_pct', ascending=False).reset_index(drop=True)
+        # Теперь сортируем и присваиваем ранги только оставшимся уникальным эмитентам
+        # Приоритет сортировки:
+        #   1) ay_pct — по убыванию (главный критерий рейтинга)
+        #   2) dps_source — declared (1) раньше forecast (2) при равном AY
+        df_res = df_res.copy()
+        df_res['_src_priority'] = df_res['dps_source'].map({'declared': 1, 'forecast': 2}).fillna(3)
+        df_res = df_res.sort_values(
+            ['_src_priority','ay_pct' ],
+            ascending=[True,False ]
+        ).drop(columns=['_src_priority']).reset_index(drop=True)
         df_res['rank'] = df_res.index + 1
 
         top_n = min(config['top_n_stocks'], len(df_res))

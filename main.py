@@ -50,6 +50,9 @@ def main():
         save_csv(rebalance, output_dir / 'rebalance_recommendations.csv')
         save_csv(outsiders, output_dir / 'outsiders.csv')
         
+        from module4_report import build_report
+        build_report(date, output_dir, output_dir, logger)
+        
     except Exception as e:
         logger.error(f"Pipeline failed: {e}", exc_info=True)
         

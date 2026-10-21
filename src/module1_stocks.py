@@ -489,10 +489,21 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
     registry = (pd.read_csv(reg_path, sep=';')
                 if reg_path.exists() else pd.DataFrame())
 
-    fund_path = data_dir / 'stock_fundamentals.csv'
-    fundamentals = (pd.read_csv(fund_path, sep=';')
-                    if fund_path.exists() else pd.DataFrame())
-
+    fund_path = data_dir / "stock_fundamentals.csv"
+    if fund_path.exists():
+        fundamentals = pd.read_csv(fund_path, sep=';')
+        if fundamentals.empty:
+            logger.warning("stock_fundamentals.csv пустой — проверки eps_ttm/payout будут пропущены")
+            fundamentals = pd.DataFrame()  # Явно помечаем как пустой
+    else:
+        fundamentals = pd.DataFrame()
+    
+    # Флаг: если fundamentals пустой, пропускаем проверки, зависящие от него
+    skip_fund_checks = fundamentals.empty
+    if skip_fund_checks:
+        logger.info("Фундаментальные данные отсутствуют — стоп-лист по eps/payout отключён")
+        
+        
     # Приводим даты
     prices_df['date'] = pd.to_datetime(prices_df['date'])
     latest_prices = (prices_df[prices_df['date'] <= date_dt]
@@ -610,18 +621,20 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
         dy_gross_pct = (dps / price) * 100
         
         # 3.6 Фундаментальные показатели
-        fund_row = (fundamentals[fundamentals['SECID'] == secid]
-                    .sort_values('report_date'))
         eps_ttm = np.nan
         payout_fwd = 0.0
         eps_yoy = np.nan
         eps_3y = np.nan
-        if not fund_row.empty:
-            last_fund = fund_row.iloc[-1]
-            eps_ttm = last_fund.get('eps_ttm', np.nan)
-            payout_fwd = last_fund.get('payout_fwd_pct', 0.0) or 0.0
-            eps_yoy = last_fund.get('eps_growth_yoy_pct', np.nan)
-            eps_3y = last_fund.get('eps_growth_3y_pct', np.nan)
+        
+        if not skip_fund_checks:
+            fund_row = (fundamentals[fundamentals['SECID'] == secid]
+                        .sort_values('report_date'))
+            if not fund_row.empty:
+                last_fund = fund_row.iloc[-1]
+                eps_ttm = last_fund.get('eps_ttm', np.nan)
+                payout_fwd = last_fund.get('payout_fwd_pct', 0.0) or 0.0
+                eps_yoy = last_fund.get('eps_growth_yoy_pct', np.nan)
+                eps_3y = last_fund.get('eps_growth_3y_pct', np.nan)
         
         # 3.7 Стоп-лист
         stop_flag = False
@@ -629,17 +642,20 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
         if dy_gross_pct < config['min_dy_gross_pct']:
             stop_flag = True
             stop_reasons.append("low_dy")
-        if pd.isna(eps_ttm) or eps_ttm <= 0:
-            stop_flag = True
-            stop_reasons.append("eps_negative")
-        if payout_fwd > config['payout_max_pct']:
-            stop_flag = True
-            stop_reasons.append("payout_max")
-        if (payout_fwd > config['payout_warn_pct']
-                and pd.notna(eps_yoy) and eps_yoy < 0):
-            stop_flag = True
-            stop_reasons.append("payout_warn_no_growth")
         
+        # Проверки по фундаментальным данным — только если они есть
+        if not skip_fund_checks:
+            if pd.isna(eps_ttm) or eps_ttm <= 0:
+                stop_flag = True
+                stop_reasons.append("eps_negative")
+            if payout_fwd > config['payout_max_pct']:
+                stop_flag = True
+                stop_reasons.append("payout_max")
+            if (payout_fwd > config['payout_warn_pct']
+                    and pd.notna(eps_yoy) and eps_yoy < 0):
+                stop_flag = True
+                stop_reasons.append("payout_warn_no_growth")
+                        
         results.append({
             'date': date, 'SECID': secid,
             'dps_source': dps_source,

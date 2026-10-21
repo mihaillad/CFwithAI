@@ -499,7 +499,22 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
                 'avg_ytm_net_pct': df_b.loc[mask, 'ytm_net_pct'].mean(),
                 'total_weight_portfolio_pct': df_b.loc[mask, 'target_weight_portfolio_pct'].sum()
             })
+
+    # === Диагностика: подсчёт причин исключения ===
+    if not df_res.empty:
+        exclusion_stats = df_res[~df_res['eligible']].groupby('exclusion_reason').size().to_dict()
+        logger.info(f"Диагностика исключений облигаций:")
+        for reason, count in sorted(exclusion_stats.items(), key=lambda x: -x[1]):
+            logger.info(f"  {reason}: {count}")
+        
+        # Дополнительно: статистика по спредам
+        if 'spread_to_cbr_pct' in df_res.columns:
+            valid_spreads = df_res['spread_to_cbr_pct'].dropna()
+            if not valid_spreads.empty:
+                logger.info(f"Спреды: min={valid_spreads.min():.2f}%, max={valid_spreads.max():.2f}%, mean={valid_spreads.mean():.2f}%")
+    # ==================================================
     
+        
     return df_ofz, df_corp, pd.DataFrame(alloc)
 
 

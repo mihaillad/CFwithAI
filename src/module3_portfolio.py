@@ -242,6 +242,15 @@ def check_required_files(data_dir: Path, logger: logging.Logger) -> tuple[Path, 
         "avg_price", "first_purchase_date", "last_purchase_date"
     ])
     save_csv(empty, holdings_path)
+    
+    # 3. Создаём пустой cash_balance.csv, если его нет
+    cash_path = data_dir / "cash_balance.csv"
+    if not cash_path.exists():
+        logger.info("cash_balance.csv не найден. Создаю пустой шаблон.")
+        empty_cash = pd.DataFrame(columns=["date", "currency", "amount"])
+        save_csv(empty_cash, cash_path)
+        logger.info(f"Создан пустой {cash_path.name}")
+        
     return holdings_path, True
 
 
@@ -372,7 +381,8 @@ def evaluate_portfolio(date: str, config: dict, data_dir: Path, output_dir: Path
                     "stop_flag": stop_flag, "action": action, "reason": reason,
                 })
             else:
-                logger.warning(f"Нет цены для акции {secid_or_isin}")
+                # logger.warning(f"Нет цены для акции {secid_or_isin}")
+                a = 0
 
         elif asset_type == "bond":
             if secid_or_isin in latest_bond_prices.index:

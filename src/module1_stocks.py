@@ -342,10 +342,11 @@ def fetch_and_save_stocks_universe(data_dir: Path, logger: logging.Logger) -> No
     # поэтому используем SHORTNAME. Поле sector справочное и не является фильтром.
     result = pd.DataFrame({
         "SECID": df_unique["SECID"],
+        "ISIN": df_unique["ISIN"],
         "issuer": df_unique["SHORTNAME"],
         "name": df_unique["SHORTNAME"],
         "sector": "Unknown",
-        "LOTSIZE": df_unique["LOTSIZE"],
+        "lotsize": df_unique["LOTSIZE"],
         "board": df_unique["BOARDID"],
         "lot_as_of": datetime.now().strftime("%Y-%m-%d")
     })

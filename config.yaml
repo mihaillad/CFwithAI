@@ -21,7 +21,7 @@ ofz_core_max_years: 3.0
 short_corp_max_years: 1.0
 min_credit_rating: "A-"
 issuer_limit_pct: 3.0
-bond_min_volume_rub: 1000000.0
+bond_min_volume_rub: 100000.0
 frozen_limit_pct: 10.0
 cooldown_days: 30
 flow_limit_pct_week: 1.0

@@ -288,14 +288,20 @@ def fetch_and_save_bond_prices(data_dir: Path, logger: logging.Logger) -> None:
 
     today_str = datetime.now().strftime("%Y-%m-%d")
 
+    # Конвертируем объём из штук в рубли
+    # VOLTODAY — количество облигаций, умножаем на цену (в % от номинала 1000)
+    nominal = 1000.0
+    volume_qty = md_df["VOLTODAY"].fillna(0.0)
+    volume_rub = volume_qty * (md_df["price_pct"] / 100.0 * nominal)
+
     res_df = pd.DataFrame({
         "date": today_str,
         "ISIN": md_df["ISIN"],
         "price_pct": md_df["price_pct"],
-        # "nkd_rub": md_df["ACCINT"].fillna(0.0),  # НКД от MOEX (обычно в рублях)
+        # "nkd_rub": md_df["ACCINT"].fillna(0.0),
         "ytm_pct": md_df["YIELD"],
-        "duration_years": md_df["DURATION"],     # MOEX отдает duration в годах
-        "volume_rub": md_df["VOLTODAY"].fillna(0.0)
+        "duration_years": md_df["DURATION"],
+        "volume_rub": volume_rub
     })
 
     # Очистка от записей без ISIN и без цены
@@ -513,7 +519,13 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
             if not valid_spreads.empty:
                 logger.info(f"Спреды: min={valid_spreads.min():.2f}%, max={valid_spreads.max():.2f}%, mean={valid_spreads.mean():.2f}%")
     # ==================================================
-    
+        # Статистика по объёмам
+        if 'volume_rub' in df_res.columns:
+            valid_volumes = df_res['volume_rub'].dropna()
+            if not valid_volumes.empty:
+                logger.info(f"Объёмы (руб): min={valid_volumes.min():,.0f}, "
+                        f"max={valid_volumes.max():,.0f}, mean={valid_volumes.mean():,.0f}")
+                    
         
     return df_ofz, df_corp, pd.DataFrame(alloc)
 

@@ -97,8 +97,7 @@ def main() -> int:
         # Формируем аргументы для каждого модуля
         module_args = list(common_args)
         
-        # Для module4_report: подменяем значение --data-dir на output_dir,
-        # т.к. module4 читает рейтинги из data/output/, а не из data/raw/
+        # Для module4_report: подменяем --data-dir на --input-dir и добавляем --raw-dir
         if script.endswith("module4_report.py"):
             new_args = []
             skip_next = False
@@ -108,10 +107,12 @@ def main() -> int:
                     continue
                 if arg == "--data-dir":
                     new_args.append("--input-dir")
-                    new_args.append(args.output_dir)   # ← подставляем output_dir
-                    skip_next = True                    # пропускаем старое значение data_dir
+                    new_args.append(args.output_dir)
+                    skip_next = True
                 else:
                     new_args.append(arg)
+            # Добавляем --raw-dir
+            new_args += ["--raw-dir", args.data_dir]
             module_args = new_args
             if args.open_report and not args.no_open_report:
                 module_args.append("--open")

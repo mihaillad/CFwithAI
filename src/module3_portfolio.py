@@ -3,13 +3,18 @@
 """
 Модуль 3. Оценка портфеля и рекомендации.
 
+Работает с матрицей субпортфелей portfolio_units.csv:
+- Целевые веса бумаг рассчитываются как sum(units по строке) / sum(всех units) * 100%
+- Стоп-лист читается из stoplist.csv (SECID, stop_date, reason)
+- Позиции вне матрицы: SELL если прибыль, HOLD если убыток и <3 лет,
+  SELL если убыток и >3 лет
+
 Автономный запуск:
     python src/module3_portfolio.py
-    python -m src.module3_portfolio --date 2026-10-22
+    python -m src.module3_portfolio --date 2026-10-23
 """
 from __future__ import annotations
 
-import argparse
 import logging
 import math
 import sys
@@ -28,15 +33,32 @@ import yaml
 DEFAULT_DATA_DIR = Path("data/raw")
 DEFAULT_OUTPUT_DIR = Path("data/output")
 DEFAULT_CONFIG_PATH = Path("config.yaml")
-
-MAX_AGE_DEALS_SEC = 3600  # 1 час
+MAX_AGE_DEALS_SEC = 3600
 DEALS_URL = "http://box:78/money/hs/reports/deals"
 
-RANKING_FILES = [
-    "stock_ranking.csv",
-    "ofz_ranking.csv",
-    "corp_ranking.csv",
-]
+# Схемы выходных файлов
+SNAP_COLS = ["date", "total_value", "stock_value", "bond_value", "bond_value_clean",
+             "cash_value", "stock_share_pct", "bond_share_pct", "cash_share_pct",
+             "target_stock_pct", "target_bond_pct", "deviation_stock_pct",
+             "deviation_bond_pct", "cash_buffer_excess_pct"]
+
+DETAIL_COLS = ["SECID_or_ISIN", "asset_type", "quantity", "current_price",
+               "current_value", "target_weight_pct", "target_value", "deviation_value",
+               "current_weight_pct", "cost_basis", "accounting_profit",
+               "accounting_profit_pct", "years_held", "dividend_sum", "dividend_pct",
+               "first_purchase_date", "in_stoplist", "action", "reason"]
+
+REC_COLS = ["date", "asset_type", "SECID_or_ISIN", "action", "reason_code", "reason_text",
+            "current_qty", "current_weight_portfolio_pct", "target_weight_portfolio_pct",
+            "deficit_pct", "qty_delta", "qty_delta_lots", "lot_size", "lot_source",
+            "amount_rub", "priority", "constraints_hit"]
+
+OUT_COLS = ["date", "asset_type", "SECID", "quantity", "first_purchase_date",
+            "holding_days", "avg_price", "current_price", "current_value", "pnl_pct",
+            "in_stoplist", "action", "reason", "priority"]
+
+HOLDINGS_COLS = ["asset_type", "SECID_or_ISIN", "quantity",
+                 "avg_price", "first_purchase_date", "last_purchase_date"]
 
 
 # ============================================================================
@@ -68,8 +90,6 @@ def load_config(config_path: Path) -> dict:
         "max_hold_years": 3,
         "top_n_freeze": 8,
         "frozen_limit_pct": 10.0,
-        "cooldown_days": 30,
-        "flow_limit_pct_week": 1.0,
         "lot_source": "universe",
     }
     if config_path.exists():
@@ -96,30 +116,49 @@ def read_csv_flex(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, sep=";")
 
 
+def infer_asset_type(secid: str) -> str:
+    """Определяет тип бумаги по формату идентификатора."""
+    s = str(secid).strip().upper()
+    if (s.startswith("RU") or s.startswith("XS")) and len(s) >= 10:
+        return "bond"
+    return "stock"
+
+
+def _num(v, default=float("nan")) -> float:
+    try:
+        f = float(v)
+        return f if math.isfinite(f) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def empty_df(cols: list) -> pd.DataFrame:
+    return pd.DataFrame(columns=cols)
+
+
+# ============================================================================
+# Загрузка deals → holdings
+# ============================================================================
 def file_age(path: Path) -> float:
-    return time.time() - path.stat().st_mtime if path.exists() else float('inf')
+    return time.time() - path.stat().st_mtime if path.exists() else float("inf")
 
 
 def is_fresh(path: Path, max_age: float) -> bool:
     return file_age(path) <= max_age
 
 
-# ============================================================================
-# Загрузка сделок
-# ============================================================================
 def fetch_and_save_deals(data_dir: Path, logger: logging.Logger) -> None:
     deals_path = data_dir / "deals.csv"
     if is_fresh(deals_path, MAX_AGE_DEALS_SEC):
         logger.info("Файл deals.csv актуален (возраст < 1 часа).")
         return
-
     logger.info("Обновление файла deals.csv с внешнего источника...")
     try:
         response = requests.get(DEALS_URL, timeout=10)
         response.raise_for_status()
         deals_path.parent.mkdir(parents=True, exist_ok=True)
-        deals_path.write_text(response.text, encoding='utf-8')
-        logger.info(f"Файл deals.csv успешно обновлён: {deals_path}")
+        deals_path.write_text(response.text, encoding="utf-8")
+        logger.info(f"Файл deals.csv успешно обновлен")
     except requests.exceptions.RequestException as e:
         logger.error(f"Ошибка при загрузке deals.csv: {e}")
         if not deals_path.exists():
@@ -127,486 +166,651 @@ def fetch_and_save_deals(data_dir: Path, logger: logging.Logger) -> None:
         logger.warning("Используется устаревший локальный файл deals.csv.")
 
 
-def deals_to_holdings(deals_path: Path, logger: logging.Logger) -> pd.DataFrame:
-    """
-    Собирает текущие позиции из файла сделок.
-    Себестоимость считается по FIFO (как в dividend_rating.py).
-    """
-    deals = read_csv_flex(deals_path)
-    if deals.empty:
-        logger.warning("deals.csv пуст")
-        return pd.DataFrame()
+def aggregate_holdings(raw: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame:
+    """Агрегирует holdings по (asset_type, SECID_or_ISIN). avg_price — средневзвешенная."""
+    if raw is None or raw.empty:
+        return empty_df(HOLDINGS_COLS)
+    h = raw.copy()
+    h.columns = [str(c).strip() for c in h.columns]
+    for c in HOLDINGS_COLS:
+        if c not in h.columns:
+            h[c] = np.nan
+    h["asset_type"] = h["asset_type"].fillna("").astype(str).str.strip().str.lower()
+    h["SECID_or_ISIN"] = h["SECID_or_ISIN"].fillna("").astype(str).str.strip().str.upper()
+    h["quantity"] = pd.to_numeric(h["quantity"], errors="coerce").fillna(0.0)
+    h["avg_price"] = pd.to_numeric(h["avg_price"], errors="coerce")
+    for c in ("first_purchase_date", "last_purchase_date"):
+        h[c] = pd.to_datetime(h[c], errors="coerce")
 
-    deals = deals.dropna(subset=["SECID"])
-    deals.columns = [c.upper() for c in deals.columns]
-    trades = deals[deals["TYPE"].isin(["BUY", "SELL"])].copy()
-    if trades.empty:
-        logger.warning("В deals.csv нет операций BUY/SELL")
-        return pd.DataFrame()
+    # Если asset_type пустой — определяем по SECID
+    mask = h["asset_type"].isin(["stock", "bond"])
+    if (~mask).any():
+        h.loc[~mask, "asset_type"] = h.loc[~mask, "SECID_or_ISIN"].apply(infer_asset_type)
 
-    trades["QTY_SIGNED"] = trades.apply(
-        lambda r: r["COUNT"] if r["TYPE"] == "BUY" else -r["COUNT"], axis=1
-    )
-    inventory = trades.groupby("SECID")["QTY_SIGNED"].sum().reset_index()
-    inventory = inventory[inventory["QTY_SIGNED"] != 0]
-    if inventory.empty:
-        logger.warning("После сверки BUY/SELL позиций не осталось")
-        return pd.DataFrame()
+    valid = h["asset_type"].isin(["stock", "bond"]) & h["SECID_or_ISIN"].ne("")
+    h = h[valid & h["quantity"].gt(0)].copy()
+    if h.empty:
+        return empty_df(HOLDINGS_COLS)
 
     rows = []
-    for _, inv_row in inventory.iterrows():
-        secid = inv_row["SECID"]
-        current_qty = int(inv_row["QTY_SIGNED"])
-        buys = trades[(trades["SECID"] == secid) & (trades["TYPE"] == "BUY")].copy()
-        if buys.empty:
-            continue
-
-        # FIFO: от новых покупок к старым — "снимаем" с хвоста, пока не наберём current_qty
-        buys = buys.sort_values("DATE", ascending=False).reset_index(drop=True)
-        buys["CUMSUM"] = buys["COUNT"].cumsum()
-        last_idx = buys[buys["CUMSUM"] >= abs(current_qty)].index.max()
-        if pd.isna(last_idx):
-            # Покупок меньше, чем текущая позиция — берём все
-            relevant_buys = buys.copy()
+    for (atype, code), g in h.groupby(["asset_type", "SECID_or_ISIN"], sort=True):
+        qty = float(g["quantity"].sum())
+        if g["avg_price"].isna().any():
+            avg = float("nan")
         else:
-            relevant_buys = buys.loc[:last_idx].copy()
-            total_in_relevant = relevant_buys["COUNT"].sum()
-            if total_in_relevant > abs(current_qty):
-                last_buy = relevant_buys.iloc[-1].copy()
-                excess = total_in_relevant - abs(current_qty)
-                portion = (last_buy["COUNT"] - excess) / last_buy["COUNT"]
-                relevant_buys.iloc[-1, relevant_buys.columns.get_loc("COUNT")] = last_buy["COUNT"] - excess
-                relevant_buys.iloc[-1, relevant_buys.columns.get_loc("SUM")] = last_buy["SUM"] * portion
-
-        acq_value = relevant_buys["SUM"].sum()
-        avg_price = acq_value / abs(current_qty) if current_qty != 0 else 0.0
-        first_date = buys["DATE"].iloc[-1]  # самая старая из отобранных
-        last_date = buys["DATE"].iloc[0]    # самая новая
-
+            avg = float((g["quantity"] * g["avg_price"]).sum() / qty)
         rows.append({
-            "asset_type": "stock",
-            "SECID_or_ISIN": secid,
-            "quantity": abs(current_qty),
-            "avg_price": avg_price,
-            "first_purchase_date": first_date,
-            "last_purchase_date": last_date,
+            "asset_type": atype, "SECID_or_ISIN": code, "quantity": qty,
+            "avg_price": avg,
+            "first_purchase_date": g["first_purchase_date"].min(),
+            "last_purchase_date": g["last_purchase_date"].max(),
         })
+    return pd.DataFrame(rows, columns=HOLDINGS_COLS)
 
-    holdings = pd.DataFrame(rows)
-    logger.info(f"Собрано позиций из deals.csv (FIFO): {len(holdings)}")
-    return holdings
+
+def deals_to_holdings(deals_path: Path, logger: logging.Logger) -> pd.DataFrame:
+    """Собирает текущие позиции из файла сделок (FIFO)."""
+    d = read_csv_flex(deals_path)
+    if d.empty:
+        return empty_df(HOLDINGS_COLS)
+    d.columns = [str(c).strip().upper() for c in d.columns]
+    aliases = {"ТИКЕР": "SECID", "ВИД": "TYPE", "ОПЕРАЦИЯ": "TYPE",
+               "КОЛ-ВО": "COUNT", "КОЛИЧЕСТВО": "COUNT", "QTY": "COUNT",
+               "СУММА": "SUM", "СТОИМОСТЬ": "SUM", "AMOUNT": "SUM",
+               "ДАТА": "DATE", "TRADE_DATE": "DATE"}
+    d = d.rename(columns={k: v for k, v in aliases.items() if k in d.columns})
+    need = {"SECID", "TYPE", "COUNT", "SUM", "DATE"}
+    if need - set(d.columns):
+        raise RuntimeError(f"deals.csv: нет колонок {sorted(need - set(d.columns))}")
+
+    d["SECID"] = d["SECID"].astype(str).str.strip().str.upper()
+    d["DATE"] = pd.to_datetime(d["DATE"], errors="coerce")
+    d["COUNT"] = pd.to_numeric(d["COUNT"], errors="coerce")
+    d["SUM"] = pd.to_numeric(d["SUM"], errors="coerce")
+    typ = d["TYPE"].astype(str).str.strip().str.upper()
+    d["TYPE"] = typ.where(typ.isin(["BUY", "SELL"]),
+                          typ.map({"ПОКУПКА": "BUY", "ПРОДАЖА": "SELL"}))
+    d = d[d["TYPE"].isin(["BUY", "SELL"])].dropna(subset=["DATE", "COUNT", "SUM"])
+    d = d[d["COUNT"].gt(0)].sort_values(["SECID", "DATE"], kind="stable")
+
+    rows = []
+    for code, g in d.groupby("SECID", sort=True):
+        queue = []
+        for _, t in g.iterrows():
+            q = float(t["COUNT"])
+            price = float(t["SUM"]) / q
+            if t["TYPE"] == "BUY":
+                queue.append([q, price, t["DATE"]])
+                continue
+            rest = q
+            while rest > 1e-9 and queue:
+                take = min(queue[0][0], rest)
+                queue[0][0] -= take
+                rest -= take
+                if queue[0][0] <= 1e-9:
+                    queue.pop(0)
+        qty = sum(l[0] for l in queue)
+        if qty <= 1e-9:
+            continue
+        cost = sum(l[0] * l[1] for l in queue)
+        atype = infer_asset_type(code)
+        rows.append({
+            "asset_type": atype, "SECID_or_ISIN": code, "quantity": qty,
+            "avg_price": cost / qty,
+            "first_purchase_date": min(l[2] for l in queue),
+            "last_purchase_date": g["DATE"].max(),
+        })
+    logger.info(f"deals -> FIFO позиций: {len(rows)}")
+    return pd.DataFrame(rows, columns=HOLDINGS_COLS) if rows else empty_df(HOLDINGS_COLS)
+
+
+# ============================================================================
+# Загрузка матрицы субпортфелей
+# ============================================================================
+def load_matrix(path: Path, logger: logging.Logger) -> pd.DataFrame:
+    """Загружает матрицу, агрегирует дубликаты по SECID (суммирует units)."""
+    if not path.exists():
+        logger.warning(f"Матрица {path.name} не найдена")
+        return empty_df(["SECID", "asset_type"])
+    df = read_csv_flex(path)
+    if df.empty or "SECID" not in df.columns:
+        return empty_df(["SECID", "asset_type"])
+
+    meta_cols = {"SECID", "asset_type"}
+    num_cols = [c for c in df.columns if c not in meta_cols]
+
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    if "asset_type" not in df.columns:
+        df["asset_type"] = ""
+    df["asset_type"] = df["asset_type"].fillna("").astype(str).str.strip().str.lower()
+    mask = ~df["asset_type"].isin(["stock", "bond"])
+    if mask.any():
+        df.loc[mask, "asset_type"] = df.loc[mask, "SECID"].apply(infer_asset_type)
+
+    df["SECID"] = df["SECID"].astype(str).str.strip().str.upper()
+
+    if num_cols:
+        agg_dict = {c: "sum" for c in num_cols}
+        agg_dict["asset_type"] = "first"
+        df = df.groupby("SECID", as_index=False).agg(agg_dict)
+
+    df = df.sort_values("SECID").reset_index(drop=True)
+    logger.info(f"Матрица загружена: {len(df)} бумаг, {len(num_cols)} субпортфелей")
+    return df
+
+
+def compute_target_weights(matrix: pd.DataFrame) -> dict:
+    """Считает целевые веса для каждой бумаги из матрицы."""
+    meta_cols = {"SECID", "asset_type"}
+    num_cols = [c for c in matrix.columns if c not in meta_cols]
+
+    m = matrix.copy()
+    m["total_units"] = m[num_cols].sum(axis=1) if num_cols else 0
+    total_all = m["total_units"].sum()
+
+    if total_all <= 0:
+        return {}
+
+    m["target_weight_pct"] = m["total_units"] / total_all * 100
+    return dict(zip(m["SECID"], m["target_weight_pct"]))
+
+
+# ============================================================================
+# Загрузка стоп-листа
+# ============================================================================
+def load_stoplist(path: Path, date_dt: pd.Timestamp, logger: logging.Logger) -> set:
+    """Загружает stoplist.csv, возвращает set активных SECID (stop_date >= date)."""
+    if not path.exists():
+        logger.info("stoplist.csv не найден — стоп-лист пуст")
+        return set()
+    df = read_csv_flex(path)
+    if df.empty or "SECID" not in df.columns or "stop_date" not in df.columns:
+        logger.warning("stoplist.csv пуст или некорректен")
+        return set()
+    df["SECID"] = df["SECID"].astype(str).str.strip().str.upper()
+    df["stop_date"] = pd.to_datetime(df["stop_date"], errors="coerce")
+    active = df[df["stop_date"] >= date_dt]
+    result = set(active["SECID"])
+    logger.info(f"Стоп-лист: {len(result)} активных бумаг")
+    return result
+
+
+# ============================================================================
+# Загрузка цен и метаданных
+# ============================================================================
+def load_stock_prices(path: Path, date_dt: pd.Timestamp, logger: logging.Logger) -> pd.DataFrame:
+    if not path.exists():
+        logger.warning("stock_prices.csv не найден")
+        return pd.DataFrame()
+    df = read_csv_flex(path)
+    if df.empty:
+        return pd.DataFrame()
+    df["SECID"] = df["SECID"].astype(str).str.strip().str.upper()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df[df["date"] <= date_dt].sort_values("date").groupby("SECID").tail(1)
+    return df.set_index("SECID")
+
+
+def load_bond_prices(path: Path, date_dt: pd.Timestamp, logger: logging.Logger) -> pd.DataFrame:
+    if not path.exists():
+        logger.warning("bond_prices.csv не найден")
+        return pd.DataFrame()
+    df = read_csv_flex(path)
+    if df.empty:
+        return pd.DataFrame()
+    df["ISIN"] = df["ISIN"].astype(str).str.strip().str.upper()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df[df["date"] <= date_dt].sort_values("date").groupby("ISIN").tail(1)
+    return df.set_index("ISIN")
+
+
+def load_bond_meta(data_dir: Path, logger: logging.Logger) -> tuple:
+    """Возвращает (nominals, lots, maturities) — словари {ISIN: value}."""
+    nominals, lots, maturities = {}, {}, {}
+    for fn in ("bonds_OFZ.csv", "bonds_CORPS.csv"):
+        p = data_dir / fn
+        if not p.exists():
+            continue
+        d = read_csv_flex(p)
+        if "ISIN" not in d.columns:
+            continue
+        d["ISIN"] = d["ISIN"].astype(str).str.strip().str.upper()
+        if "nominal" in d.columns:
+            for isin, v in zip(d["ISIN"], pd.to_numeric(d["nominal"], errors="coerce")):
+                n = _num(v, 1000.0)
+                if n > 0:
+                    nominals[isin] = n
+        # Лотность: пробуем разные варианты имени колонки
+        for lot_col in ("lot_size", "LOTSIZE", "lotsize"):
+            if lot_col in d.columns:
+                for isin, v in zip(d["ISIN"], pd.to_numeric(d[lot_col], errors="coerce")):
+                    lots[isin] = max(1, int(_num(v, 1.0)))
+                break
+        if "maturity_date" in d.columns:
+            for isin, v in zip(d["ISIN"], d["maturity_date"]):
+                md = pd.to_datetime(v, errors="coerce")
+                if pd.notna(md):
+                    maturities[isin] = md
+    logger.info(f"Мета облигаций: номиналы={len(nominals)}, лоты={len(lots)}, погашения={len(maturities)}")
+    return nominals, lots, maturities
+
+
+def load_stock_lots(data_dir: Path, logger: logging.Logger) -> dict:
+    """Загружает lot_size для акций из stocks_universe.csv."""
+    p = data_dir / "stocks_universe.csv"
+    if not p.exists():
+        return {}
+    df = read_csv_flex(p)
+    if df.empty or "SECID" not in df.columns:
+        return {}
+    df["SECID"] = df["SECID"].astype(str).str.strip().str.upper()
+    result = {}
+    for lot_col in ("lot_size", "LOTSIZE", "lotsize"):
+        if lot_col in df.columns:
+            for secid, v in zip(df["SECID"], pd.to_numeric(df[lot_col], errors="coerce")):
+                result[secid] = max(1, int(_num(v, 1.0)))
+            break
+    logger.info(f"Лотность акций загружена: {len(result)} тикеров")
+    return result
+
+
+def load_cash(data_dir: Path, logger: logging.Logger) -> float:
+    p = data_dir / "cash_balance.csv"
+    if not p.exists():
+        logger.warning("cash_balance.csv не найден, cash_value = 0")
+        return 0.0
+    df = read_csv_flex(p)
+    if df.empty:
+        return 0.0
+    if "currency" in df.columns and "amount" in df.columns:
+        rub = df["currency"].astype(str).str.upper() == "RUB"
+        return float(df.loc[rub, "amount"].sum())
+    return 0.0
+
+
+def load_stock_ranking(output_dir: Path, logger: logging.Logger) -> pd.DataFrame:
+    p = output_dir / "stock_ranking.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    df = read_csv_flex(p)
+    if "SECID" in df.columns:
+        df["SECID"] = df["SECID"].astype(str).str.strip().str.upper()
+    return df
 
 
 # ============================================================================
 # Проверка входных файлов
 # ============================================================================
-def check_required_files(data_dir: Path, logger: logging.Logger) -> tuple[Path, bool]:
-    holdings_path = data_dir / "portfolio_holdings.csv"
-    deals_path = data_dir / "deals.csv"
+def check_required_files(data_dir: Path, logger: logging.Logger) -> tuple:
+    """Проверяет holdings/deals, создаёт пустые шаблоны при необходимости."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    hp = data_dir / "portfolio_holdings.csv"
+    dp = data_dir / "deals.csv"
+    created = False
 
-    if holdings_path.exists():
-        logger.info(f"Используется существующий {holdings_path.name}")
-        # Параллельно гарантируем cash_balance.csv
-        cash_path = data_dir / "cash_balance.csv"
-        if not cash_path.exists():
-            empty_cash = pd.DataFrame(columns=["date", "currency", "amount"])
-            save_csv(empty_cash, cash_path)
-            logger.info(f"Создан пустой {cash_path.name}")
-        return holdings_path, False
+    try:
+        fetch_and_save_deals(data_dir, logger)
+    except Exception as e:
+        logger.warning(f"deals.csv не обновлён: {e}")
 
-    if deals_path.exists():
-        logger.info(f"{holdings_path.name} не найден, собираю позиции из {deals_path.name}...")
-        holdings = deals_to_holdings(deals_path, logger)
-        if not holdings.empty:
-            save_csv(holdings, holdings_path)
-            logger.info(f"Создан {holdings_path.name}: {len(holdings)} позиций")
-        else:
-            logger.warning("Не удалось собрать позиции из deals.csv")
-            empty = pd.DataFrame(columns=[
-                "asset_type", "SECID_or_ISIN", "quantity",
-                "avg_price", "first_purchase_date", "last_purchase_date"
-            ])
-            save_csv(empty, holdings_path)
-    else:
-        logger.warning("portfolio_holdings.csv и deals.csv отсутствуют. Создаю пустой шаблон.")
-        empty = pd.DataFrame(columns=[
-            "asset_type", "SECID_or_ISIN", "quantity",
-            "avg_price", "first_purchase_date", "last_purchase_date"
-        ])
-        save_csv(empty, holdings_path)
+    if dp.exists() and (not hp.exists() or file_age(dp) <= file_age(hp)):
+        h = deals_to_holdings(dp, logger)
+        if not h.empty:
+            save_csv(aggregate_holdings(h, logger), hp)
+            created = True
+            logger.info(f"portfolio_holdings пересобран из deals: {len(h)} позиций")
 
-    cash_path = data_dir / "cash_balance.csv"
-    if not cash_path.exists():
-        empty_cash = pd.DataFrame(columns=["date", "currency", "amount"])
-        save_csv(empty_cash, cash_path)
-        logger.info(f"Создан пустой {cash_path.name}")
+    if not hp.exists():
+        save_csv(empty_df(HOLDINGS_COLS), hp)
+        created = True
+        logger.warning("Создан пустой portfolio_holdings.csv")
 
-    return holdings_path, True
+    cp = data_dir / "cash_balance.csv"
+    if not cp.exists():
+        save_csv(pd.DataFrame(columns=["currency", "amount"]), cp)
+        logger.warning("Создан пустой cash_balance.csv")
 
-
-def check_ranking_files(output_dir: Path, logger: logging.Logger) -> dict[str, pd.DataFrame]:
-    result = {}
-    for name in RANKING_FILES:
-        path = output_dir / name
-        if path.exists():
-            result[name] = read_csv_flex(path)
-            logger.info(f"Загружен {name}: {len(result[name])} строк")
-        else:
-            logger.warning(f"{name} не найден в {output_dir} — будет пустой рейтинг")
-            result[name] = pd.DataFrame()
-    return result
+    return hp, created
 
 
 # ============================================================================
-# Детальная таблица портфеля
-# ============================================================================
-def build_portfolio_details(date: str, holdings: pd.DataFrame,
-                            latest_stock_prices: pd.DataFrame,
-                            latest_bond_prices: pd.DataFrame,
-                            stock_ranking: pd.DataFrame,
-                            ofz_ranking: pd.DataFrame,
-                            corp_ranking: pd.DataFrame,
-                            total_value: float,
-                            date_dt: pd.Timestamp) -> pd.DataFrame:
-    """Формирует детальную таблицу портфеля для HTML-отчёта."""
-    if holdings.empty:
-        return pd.DataFrame()
-
-    # Быстрые словари для поиска целевых весов и DPS
-    stock_target = {}
-    stock_dps = {}
-    if not stock_ranking.empty and "SECID" in stock_ranking.columns:
-        for _, r in stock_ranking.iterrows():
-            stock_target[r["SECID"]] = float(r.get("target_weight_portfolio_pct", 0) or 0)
-            dps_val = r.get("dps_reg_next", 0)
-            stock_dps[r["SECID"]] = float(dps_val) if pd.notna(dps_val) else 0.0
-
-    bond_target = {}
-    for r_df in (ofz_ranking, corp_ranking):
-        if not r_df.empty and "ISIN" in r_df.columns:
-            for _, r in r_df.iterrows():
-                bond_target[r["ISIN"]] = float(r.get("target_weight_portfolio_pct", 0) or 0)
-
-    rows = []
-    for _, h in holdings.iterrows():
-        asset_type = h["asset_type"]
-        secid_or_isin = h["SECID_or_ISIN"]
-        qty = float(h["quantity"])
-        avg_price = float(h["avg_price"]) if pd.notna(h.get("avg_price")) else 0.0
-        first_purchase = h.get("first_purchase_date")
-
-        current_price = 0.0
-        current_value = 0.0
-        target_w = 0.0
-        dps_next = 0.0
-        div_sum = 0.0
-        div_pct = 0.0
-
-        if asset_type == "stock":
-            if secid_or_isin not in latest_stock_prices.index:
-                continue
-            current_price = float(latest_stock_prices.loc[secid_or_isin, "close"])
-            current_value = qty * current_price
-            target_w = stock_target.get(secid_or_isin, 0.0)
-            dps_next = stock_dps.get(secid_or_isin, 0.0)
-            div_sum = dps_next * qty
-            div_pct = (div_sum / current_value * 100) if current_value > 0 else 0.0
-
-        elif asset_type == "bond":
-            if secid_or_isin not in latest_bond_prices.index:
-                continue
-            p_row = latest_bond_prices.loc[secid_or_isin]
-            nominal = 1000.0
-            # Безопасное получение НКД (колонка может отсутствовать)
-            nkd = float(p_row.get("nkd_rub", 0.0) or 0.0)
-            price_pct = float(p_row.get("price_pct", 0.0) or 0.0)
-            current_price = (price_pct / 100 * nominal) + nkd
-            current_value = qty * current_price
-            target_w = bond_target.get(secid_or_isin, 0.0)
-        else:
-            continue
-
-        cost_basis = qty * avg_price
-        target_value = total_value * target_w / 100
-        deviation = current_value - target_value
-        current_weight = (current_value / total_value * 100) if total_value > 0 else 0.0
-        accounting_profit = current_value - cost_basis
-        accounting_profit_pct = ((current_value / cost_basis) - 1) * 100 if cost_basis > 0 else 0.0
-
-        years_held = 0.0
-        if pd.notna(first_purchase) and str(first_purchase).strip():
-            try:
-                fp = pd.to_datetime(first_purchase)
-                years_held = round((date_dt - fp).days / 365.25, 2)
-            except Exception:
-                years_held = 0.0
-
-        rows.append({
-            "date": date, "asset_type": asset_type,
-            "SECID_or_ISIN": secid_or_isin, "quantity": qty,
-            "current_price": round(current_price, 4),
-            "current_value": round(current_value, 2),
-            "target_weight_pct": round(target_w, 4),
-            "target_value": round(target_value, 2),
-            "deviation_value": round(deviation, 2),
-            "current_weight_pct": round(current_weight, 4),
-            "cost_basis": round(cost_basis, 2),
-            "accounting_profit": round(accounting_profit, 2),
-            "accounting_profit_pct": round(accounting_profit_pct, 4),
-            "years_held": years_held,
-            "dividend_sum": round(div_sum, 2),
-            "dividend_pct": round(div_pct, 4),
-            "first_purchase_date": first_purchase,
-        })
-
-    return pd.DataFrame(rows)
-
-
-# ============================================================================
-# Основная функция модуля
+# Основная функция
 # ============================================================================
 def evaluate_portfolio(date: str, config: dict, data_dir: Path, output_dir: Path,
-                       logger: logging.Logger, diagnostics: list
-                       ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Оценка портфеля, расчёт дефицитов, генерация рекомендаций и аутсайдеров.
-    Возвращает: (snapshot, recommendations, outsiders, portfolio_details)
-    """
+                       logger: logging.Logger, diagnostics: list) -> tuple:
     date_dt = pd.to_datetime(date)
 
-    # --- Загрузка рейтингов ---
-    rankings = check_ranking_files(output_dir, logger)
-    stock_ranking = rankings["stock_ranking.csv"]
-    ofz_ranking = rankings["ofz_ranking.csv"]
-    corp_ranking = rankings["corp_ranking.csv"]
+    # 1. Загрузка матрицы
+    matrix = load_matrix(data_dir / "portfolio_units.csv", logger)
+    if matrix.empty:
+        raise RuntimeError("Матрица субпортфелей пуста — нечего оценивать")
 
-    # --- Загрузка holdings ---
-    holdings_path = data_dir / "portfolio_holdings.csv"
-    holdings = read_csv_flex(holdings_path) if holdings_path.exists() else pd.DataFrame()
+    # 2. Целевые веса
+    target_weights = compute_target_weights(matrix)
+    total_units_all = sum(target_weights.values())
+    logger.info(f"Целевые веса рассчитаны: {len(target_weights)} бумаг, сумма units = {total_units_all:.2f}")
 
-    # --- Загрузка cash ---
-    cash_path = data_dir / "cash_balance.csv"
-    cash_value = 0.0
-    if cash_path.exists():
-        cash = read_csv_flex(cash_path)
-        if "currency" in cash.columns and "amount" in cash.columns:
-            cash_value = float(cash[cash["currency"] == "RUB"]["amount"].sum())
-    else:
-        logger.warning("cash_balance.csv не найден, cash_value = 0")
+    # 3. Asset types из матрицы
+    asset_types = dict(zip(matrix["SECID"], matrix["asset_type"]))
 
-    # --- Загрузка цен ---
-    latest_stock_prices = pd.DataFrame()
-    prices_stocks_path = data_dir / "stock_prices.csv"
-    if prices_stocks_path.exists():
-        p = read_csv_flex(prices_stocks_path)
-        if "date" in p.columns and "SECID" in p.columns and "close" in p.columns:
-            p["date"] = pd.to_datetime(p["date"])
-            latest_stock_prices = (p[p["date"] <= date].sort_values("date")
-                                    .groupby("SECID").tail(1).set_index("SECID"))
+    # 4. Загрузка holdings
+    holdings = aggregate_holdings(read_csv_flex(data_dir / "portfolio_holdings.csv"), logger)
 
-    latest_bond_prices = pd.DataFrame()
-    prices_bonds_path = data_dir / "bond_prices.csv"
-    if prices_bonds_path.exists():
-        p = read_csv_flex(prices_bonds_path)
-        if "date" in p.columns and "ISIN" in p.columns:
-            p["date"] = pd.to_datetime(p["date"])
-            latest_bond_prices = (p[p["date"] <= date].sort_values("date")
-                                   .groupby("ISIN").tail(1).set_index("ISIN"))
+    # 5. Загрузка цен и метаданных
+    stock_prices = load_stock_prices(data_dir / "stock_prices.csv", date_dt, logger)
+    bond_prices = load_bond_prices(data_dir / "bond_prices.csv", date_dt, logger)
+    nominals, bond_lots, maturities = load_bond_meta(data_dir, logger)
+    stock_lots = load_stock_lots(data_dir, logger)
 
-    # --- Загрузка universe для лотности ---
-    universe_stocks = pd.DataFrame()
-    if (data_dir / "stocks_universe.csv").exists():
-        universe_stocks = read_csv_flex(data_dir / "stocks_universe.csv")
+    # 6. Стоп-лист
+    stoplist = load_stoplist(data_dir / "stoplist.csv", date_dt, logger)
 
-    # --- Оценка стоимости ---
-    stock_val = 0.0
-    bond_val = 0.0
-    bond_val_clean = 0.0
-    recommendations = []
-    outsiders = []
+    # 7. Рейтинг акций (для dps_reg_next)
+    stock_ranking = load_stock_ranking(output_dir, logger)
+    dps_map = {}
+    if not stock_ranking.empty and "dps_reg_next" in stock_ranking.columns:
+        for _, r in stock_ranking.iterrows():
+            dps_map[r["SECID"]] = _num(r.get("dps_reg_next"), 0.0)
 
-    # Быстрый словарь лотности
-    lot_map = {}
-    if not universe_stocks.empty and "SECID" in universe_stocks.columns and "lot_size" in universe_stocks.columns:
-        lot_map = dict(zip(universe_stocks["SECID"],
-                           pd.to_numeric(universe_stocks["lot_size"], errors="coerce").fillna(1).astype(int)))
+    # 8. Кэш
+    cash_value = load_cash(data_dir, logger)
 
-    for _, h in holdings.iterrows():
-        asset_type = h["asset_type"]
-        secid_or_isin = h["SECID_or_ISIN"]
-        qty = float(h["quantity"])
-        avg_price = float(h["avg_price"]) if pd.notna(h.get("avg_price")) else 0.0
+    # 9. Оценка позиций
+    positions = []
+    all_secids = set(holdings["SECID_or_ISIN"].str.upper()) | set(target_weights.keys())
 
-        if asset_type == "stock":
-            if secid_or_isin not in latest_stock_prices.index:
-                continue
-            close = float(latest_stock_prices.loc[secid_or_isin, "close"])
-            val = qty * close
-            stock_val += val
+    for secid in all_secids:
+        atype = asset_types.get(secid, "stock")
 
-            holding_days = 0
-            if pd.notna(h.get("first_purchase_date")):
-                try:
-                    holding_days = (date_dt - pd.to_datetime(h["first_purchase_date"])).days
-                except Exception:
-                    holding_days = 0
+        # Поиск в holdings
+        h_row = holdings[holdings["SECID_or_ISIN"].str.upper() == secid]
+        if not h_row.empty:
+            h_row = h_row.iloc[0]
+            qty = float(h_row["quantity"])
+            avg_price = _num(h_row["avg_price"])
+            first_purchase = h_row["first_purchase_date"]
+        else:
+            qty = 0.0
+            avg_price = float("nan")
+            first_purchase = pd.NaT
 
-            pnl_pct = ((close - avg_price) / avg_price * 100) if avg_price > 0 else np.nan
+        # Цена и текущая стоимость
+        current_price = float("nan")
+        current_value = float("nan")
+        clean_value = 0.0
 
-            stock_info = stock_ranking[stock_ranking["SECID"] == secid_or_isin] if not stock_ranking.empty else pd.DataFrame()
-            rank = int(stock_info["rank"].iloc[0]) if not stock_info.empty and "rank" in stock_info.columns else 999
-            stop_flag = bool(stock_info["stop_flag"].iloc[0]) if not stock_info.empty and "stop_flag" in stock_info.columns else False
-            in_top_freeze = rank <= config["top_n_freeze"]
+        if atype == "stock":
+            if secid in stock_prices.index:
+                current_price = _num(stock_prices.loc[secid].get("close"))
+                if math.isfinite(current_price) and qty > 0:
+                    current_value = qty * current_price
+        else:  # bond
+            if secid in bond_prices.index:
+                bp = bond_prices.loc[secid]
+                price_pct = _num(bp.get("price_pct"))
+                nkd = _num(bp.get("nkd_rub"), 0.0)
+                nominal = nominals.get(secid, 1000.0)
+                if math.isfinite(price_pct):
+                    current_price = price_pct / 100.0 * nominal + nkd
+                    if qty > 0:
+                        current_value = qty * current_price
+                        clean_value = qty * price_pct / 100.0 * nominal
 
-            action = "HOLD"
-            reason = "no_action"
+        cost_basis = qty * avg_price if (qty > 0 and math.isfinite(avg_price)) else float("nan")
 
-            if stop_flag:
-                action = "SELL"
-                reason = "stop_list"
-            elif pd.notna(pnl_pct) and pnl_pct >= config["profit_take_pct"]:
-                action = "SELL"
-                reason = "profit_take"
-            elif holding_days >= 365 * config["max_hold_years"] and pd.notna(pnl_pct) and pnl_pct < 0:
-                if in_top_freeze:
-                    action = "FREEZE"
-                    reason = "three_year_top_freeze"
+        # Целевой вес
+        target_w = target_weights.get(secid, 0.0)
+
+        # Дивиденды (только для акций)
+        div_sum = dps_map.get(secid, 0.0) * qty if atype == "stock" else 0.0
+        div_pct = div_sum / current_value * 100 if (math.isfinite(current_value) and current_value > 0) else float("nan")
+
+        # PnL
+        pnl_pct = ((current_value / cost_basis) - 1) * 100 if (math.isfinite(current_value) and math.isfinite(cost_basis) and cost_basis > 0) else float("nan")
+
+        # Years held
+        years_held = float("nan")
+        holding_days = float("nan")
+        if pd.notna(first_purchase):
+            try:
+                fp = pd.to_datetime(first_purchase)
+                holding_days = (date_dt - fp).days
+                years_held = holding_days / 365.25
+            except Exception:
+                pass
+
+        # In stoplist
+        in_stop = secid in stoplist
+
+        # Определяем action/reason/priority
+        action, reason, priority = "HOLD", "no_action", 100
+
+        if in_stop:
+            action, reason, priority = "SELL", "stop_list", 1
+        elif atype == "bond" and secid in maturities and maturities[secid] <= date_dt:
+            action, reason, priority = "SELL", "matured", 2
+        elif target_w > 0:  # есть в матрице
+            if math.isfinite(years_held) and years_held >= 3 and math.isfinite(pnl_pct) and pnl_pct < 0:
+                action, reason, priority = "SELL", "three_year_exit", 3
+            elif math.isfinite(pnl_pct) and pnl_pct >= config.get("profit_take_pct", 5.0):
+                action, reason, priority = "SELL", "profit_take", 4
+            else:
+                action, reason, priority = "HOLD", "in_matrix", 100
+        else:  # нет в матрице
+            if math.isfinite(current_value) and math.isfinite(cost_basis):
+                if current_value > cost_basis:
+                    action, reason, priority = "SELL", "not_in_matrix", 4
+                elif math.isfinite(years_held) and years_held > 3:
+                    action, reason, priority = "SELL", "over_3_years", 3
                 else:
-                    action = "SELL"
-                    reason = "three_year_exit"
+                    action, reason, priority = "HOLD", "not_in_matrix_loss", 100
+            elif not math.isfinite(current_value):
+                action, reason, priority = "HOLD", "no_price", 99
 
-            outsiders.append({
-                "date": date, "SECID": secid_or_isin,
-                "first_purchase_date": h.get("first_purchase_date", ""),
-                "holding_days": holding_days, "avg_price": avg_price,
-                "current_price": close, "pnl_pct": pnl_pct,
-                "in_top_freeze_ay": in_top_freeze,
-                "top_n_freeze_used": config["top_n_freeze"],
-                "stop_flag": stop_flag, "action": action, "reason": reason,
-            })
+        positions.append({
+            "SECID_or_ISIN": secid,
+            "asset_type": atype,
+            "quantity": qty,
+            "current_price": round(current_price, 4) if math.isfinite(current_price) else float("nan"),
+            "current_value": round(current_value, 2) if math.isfinite(current_value) else float("nan"),
+            "target_weight_pct": round(target_w, 4),
+            "cost_basis": round(cost_basis, 2) if math.isfinite(cost_basis) else float("nan"),
+            "accounting_profit": round(current_value - cost_basis, 2) if (math.isfinite(current_value) and math.isfinite(cost_basis)) else float("nan"),
+            "accounting_profit_pct": round(pnl_pct, 4) if math.isfinite(pnl_pct) else float("nan"),
+            "years_held": round(years_held, 2) if math.isfinite(years_held) else float("nan"),
+            "dividend_sum": round(div_sum, 2),
+            "dividend_pct": round(div_pct, 4) if math.isfinite(div_pct) else float("nan"),
+            "first_purchase_date": first_purchase,
+            "in_stoplist": in_stop,
+            "action": action,
+            "reason": reason,
+            "priority": priority,
+            "_clean_value": clean_value,
+            "_pnl_pct": pnl_pct,
+            "_holding_days": holding_days,
+        })
 
-        elif asset_type == "bond":
-            if secid_or_isin not in latest_bond_prices.index:
-                continue
-            p_row = latest_bond_prices.loc[secid_or_isin]
-            nominal = 1000.0
-            nkd = float(p_row.get("nkd_rub", 0.0) or 0.0)
-            if pd.isna(p_row.get("nkd_rub")):
-                diagnostics.append({"code": "nkd_missing", "details": f"ISIN {secid_or_isin}"})
-            price_pct = float(p_row.get("price_pct", 0.0) or 0.0)
-            val = qty * ((price_pct / 100 * nominal) + nkd)
-            clean_val = qty * (price_pct / 100 * nominal)
-            bond_val += val
-            bond_val_clean += clean_val
+    df_pos = pd.DataFrame(positions)
 
+    # 10. Расчёт total_value
+    stock_val = df_pos.loc[df_pos["asset_type"] == "stock", "current_value"].sum()
+    bond_val = df_pos.loc[df_pos["asset_type"] == "bond", "current_value"].sum()
+    bond_clean = df_pos.loc[df_pos["asset_type"] == "bond", "_clean_value"].sum()
     total_value = stock_val + bond_val + cash_value
 
-    # --- Формирование snapshot (всегда!) ---
-    if total_value == 0:
-        logger.warning("total_value == 0 — портфель пуст")
-        snapshot = pd.DataFrame([{
-            "date": date, "total_value": 0, "stock_value": 0, "bond_value": 0,
-            "bond_value_clean": 0, "cash_value": cash_value,
-            "stock_share_pct": 0, "bond_share_pct": 0, "cash_share_pct": 100,
-            "target_stock_pct": config["stock_sleeve_pct"],
-            "target_bond_pct": config["bond_sleeve_pct"],
-            "deviation_stock_pct": -config["stock_sleeve_pct"],
-            "deviation_bond_pct": -config["bond_sleeve_pct"],
-            "cash_buffer_excess_pct": 100 - config["cash_buffer_pct"],
-        }])
-        portfolio_details = pd.DataFrame()
-        return snapshot, pd.DataFrame(recommendations), pd.DataFrame(outsiders), portfolio_details
+    if total_value <= 0:
+        raise RuntimeError("total_value == 0 — нечего оценивать")
+
+    # 11. Заполнение deviation, target_value, current_weight_pct
+    df_pos["target_value"] = df_pos["target_weight_pct"] / 100 * total_value
+    df_pos["deviation_value"] = df_pos["current_value"].fillna(0) - df_pos["target_value"]
+    df_pos["current_weight_pct"] = df_pos["current_value"].fillna(0) / total_value * 100
+
+    # 12. Snapshot
+    target_stock_pct = df_pos.loc[df_pos["asset_type"] == "stock", "target_weight_pct"].sum()
+    target_bond_pct = df_pos.loc[df_pos["asset_type"] == "bond", "target_weight_pct"].sum()
 
     snapshot = pd.DataFrame([{
         "date": date,
         "total_value": total_value,
         "stock_value": stock_val,
         "bond_value": bond_val,
-        "bond_value_clean": bond_val_clean,
+        "bond_value_clean": bond_clean,
         "cash_value": cash_value,
         "stock_share_pct": stock_val / total_value * 100,
         "bond_share_pct": bond_val / total_value * 100,
         "cash_share_pct": cash_value / total_value * 100,
-        "target_stock_pct": config["stock_sleeve_pct"],
-        "target_bond_pct": config["bond_sleeve_pct"],
-        "deviation_stock_pct": stock_val / total_value * 100 - config["stock_sleeve_pct"],
-        "deviation_bond_pct": bond_val / total_value * 100 - config["bond_sleeve_pct"],
-        "cash_buffer_excess_pct": cash_value / total_value * 100 - config["cash_buffer_pct"],
-    }])
+        "target_stock_pct": target_stock_pct,
+        "target_bond_pct": target_bond_pct,
+        "deviation_stock_pct": stock_val / total_value * 100 - target_stock_pct,
+        "deviation_bond_pct": bond_val / total_value * 100 - target_bond_pct,
+        "cash_buffer_excess_pct": cash_value / total_value * 100 - config.get("cash_buffer_pct", 2.0),
+    }], columns=SNAP_COLS)
 
-    # --- Рекомендации по докупке акций (по дефициту веса) ---
-    if not stock_ranking.empty and "eligible_for_buy" in stock_ranking.columns:
-        eligible = stock_ranking[stock_ranking["eligible_for_buy"] == True].copy()
+    # 13. Outsiders (все позиции с action != HOLD или с проблемами)
+    outsiders = []
+    for _, p in df_pos.iterrows():
+        if p["action"] != "HOLD" or p["in_stoplist"] or not math.isfinite(p["current_value"]):
+            outsiders.append({
+                "date": date,
+                "asset_type": p["asset_type"],
+                "SECID": p["SECID_or_ISIN"],
+                "quantity": p["quantity"],
+                "first_purchase_date": p["first_purchase_date"],
+                "holding_days": p["_holding_days"] if math.isfinite(p["_holding_days"]) else float("nan"),
+                "avg_price": p["cost_basis"] / p["quantity"] if (p["quantity"] > 0 and math.isfinite(p["cost_basis"])) else float("nan"),
+                "current_price": p["current_price"],
+                "current_value": p["current_value"],
+                "pnl_pct": p["_pnl_pct"],
+                "in_stoplist": p["in_stoplist"],
+                "action": p["action"],
+                "reason": p["reason"],
+                "priority": p["priority"],
+            })
+    df_out = pd.DataFrame(outsiders, columns=OUT_COLS) if outsiders else empty_df(OUT_COLS)
 
-        # Текущие веса по акциям
-        current_weights = {}
-        if not holdings.empty:
-            stock_holdings = holdings[holdings["asset_type"] == "stock"]
-            for _, h_row in stock_holdings.iterrows():
-                sec = h_row["SECID_or_ISIN"]
-                if sec in latest_stock_prices.index:
-                    cur_val = float(h_row["quantity"]) * float(latest_stock_prices.loc[sec, "close"])
-                    current_weights[sec] = current_weights.get(sec, 0.0) + cur_val
+    # 14. Recommendations (SELL + BUY)
+    recs = []
+    available = max(0.0, cash_value - total_value * config.get("cash_buffer_pct", 2.0) / 100)
 
-        for _, row in eligible.iterrows():
-            secid = row["SECID"]
-            target_w = float(row.get("target_weight_portfolio_pct", 0) or 0)
-            current_val = current_weights.get(secid, 0.0)
-            current_w = current_val / total_value * 100
-            deficit_pct = target_w - current_w
+    # SELL рекомендации
+    for _, p in df_pos.iterrows():
+        if p["action"] != "SELL":
+            continue
+        if not math.isfinite(p["current_price"]) or p["quantity"] <= 0:
+            continue
+        lot_size = stock_lots.get(p["SECID_or_ISIN"], 1) if p["asset_type"] == "stock" else bond_lots.get(p["SECID_or_ISIN"], 1)
+        lot_source = "universe" if (p["SECID_or_ISIN"] in stock_lots or p["SECID_or_ISIN"] in bond_lots) else "assumed"
+        nlots = math.floor(p["quantity"] / lot_size)
+        qd = nlots * lot_size
+        if qd <= 0:
+            continue
+        amount = qd * p["current_price"]
+        recs.append({
+            "date": date, "asset_type": p["asset_type"], "SECID_or_ISIN": p["SECID_or_ISIN"],
+            "action": "SELL", "reason_code": p["reason"], "reason_text": p["reason"],
+            "current_qty": p["quantity"], "current_weight_portfolio_pct": p["current_weight_pct"],
+            "target_weight_portfolio_pct": p["target_weight_pct"],
+            "deficit_pct": p["target_weight_pct"] - p["current_weight_pct"],
+            "qty_delta": -qd, "qty_delta_lots": -nlots, "lot_size": lot_size, "lot_source": lot_source,
+            "amount_rub": amount, "priority": p["priority"], "constraints_hit": "",
+        })
+        available += amount  # Освобождаем кэш от продаж
 
-            if deficit_pct > config["min_deficit_pct"]:
-                price = float(row["price"])
-                lot_size = lot_map.get(secid, 1)
-                lot_source = "universe" if secid in lot_map else "assumed"
+    # BUY рекомендации
+    buy_candidates = []
+    for secid, target_w in target_weights.items():
+        if target_w <= 0:
+            continue
+        p_row = df_pos[df_pos["SECID_or_ISIN"] == secid]
+        current_w = float(p_row["current_weight_pct"].iloc[0]) if not p_row.empty else 0.0
+        deficit = target_w - current_w
+        if deficit <= config.get("min_deficit_pct", 0.5):
+            continue
+        atype = asset_types.get(secid, "stock")
+        if atype == "stock":
+            price = _num(stock_prices.loc[secid].get("close")) if secid in stock_prices.index else float("nan")
+            lot_size = stock_lots.get(secid, 1)
+        else:
+            if secid in bond_prices.index:
+                bp = bond_prices.loc[secid]
+                price_pct = _num(bp.get("price_pct"))
+                nkd = _num(bp.get("nkd_rub"), 0.0)
+                nominal = nominals.get(secid, 1000.0)
+                price = price_pct / 100.0 * nominal + nkd if math.isfinite(price_pct) else float("nan")
+            else:
+                price = float("nan")
+            lot_size = bond_lots.get(secid, 1)
+        lot_source = "universe" if (secid in stock_lots or secid in bond_lots) else "assumed"
+        buy_candidates.append((target_w, atype, secid, target_w, price, lot_size, lot_source, deficit))
 
-                deficit_rub = deficit_pct / 100 * total_value
-                lots_delta = math.floor(deficit_rub / (price * lot_size)) if (price * lot_size) > 0 else 0
-                qty_delta = lots_delta * lot_size
+    buy_candidates.sort(key=lambda x: -x[0])  # Сортируем по убыванию target_weight
 
-                action = "BUY" if qty_delta > 0 else "NO_ACTION"
-                reason_code = "deficit" if action == "BUY" else "lot_too_small"
+    for i, (_, atype, secid, target_w, price, lot_size, lot_source, deficit) in enumerate(buy_candidates, start=5):
+        if not math.isfinite(price) or price <= 0:
+            recs.append({
+                "date": date, "asset_type": atype, "SECID_or_ISIN": secid,
+                "action": "NO_ACTION", "reason_code": "no_price", "reason_text": "Нет цены",
+                "current_qty": 0, "current_weight_portfolio_pct": 0,
+                "target_weight_portfolio_pct": target_w, "deficit_pct": deficit,
+                "qty_delta": 0, "qty_delta_lots": 0, "lot_size": lot_size, "lot_source": lot_source,
+                "amount_rub": 0, "priority": 99, "constraints_hit": "no_price",
+            })
+            continue
+        desired = deficit / 100 * total_value
+        afford = min(desired, available)
+        lot_price = price * lot_size
+        nlots = math.floor(afford / lot_price) if lot_price > 0 else 0
+        if nlots <= 0:
+            recs.append({
+                "date": date, "asset_type": atype, "SECID_or_ISIN": secid,
+                "action": "NO_ACTION", "reason_code": "lot_too_small" if afford < lot_price else "insufficient_cash",
+                "reason_text": "Лот слишком дорог" if afford < lot_price else "Недостаточно кэша",
+                "current_qty": 0, "current_weight_portfolio_pct": 0,
+                "target_weight_portfolio_pct": target_w, "deficit_pct": deficit,
+                "qty_delta": 0, "qty_delta_lots": 0, "lot_size": lot_size, "lot_source": lot_source,
+                "amount_rub": 0, "priority": 99, "constraints_hit": "cash_limit" if desired > afford else "",
+            })
+            continue
+        qd = nlots * lot_size
+        amount = qd * price
+        available -= amount
+        recs.append({
+            "date": date, "asset_type": atype, "SECID_or_ISIN": secid,
+            "action": "BUY", "reason_code": "deficit", "reason_text": f"Deficit {deficit:.2f}%",
+            "current_qty": 0, "current_weight_portfolio_pct": 0,
+            "target_weight_portfolio_pct": target_w, "deficit_pct": deficit,
+            "qty_delta": qd, "qty_delta_lots": nlots, "lot_size": lot_size, "lot_source": lot_source,
+            "amount_rub": amount, "priority": i, "constraints_hit": "",
+        })
 
-                recommendations.append({
-                    "date": date, "asset_type": "stock",
-                    "SECID_or_ISIN": secid,
-                    "action": action, "reason_code": reason_code,
-                    "reason_text": f"Deficit {deficit_pct:.2f}%",
-                    "current_qty": current_val / price if price > 0 else 0,
-                    "current_weight_portfolio_pct": current_w,
-                    "target_weight_portfolio_pct": target_w,
-                    "deficit_pct": deficit_pct,
-                    "qty_delta": qty_delta, "qty_delta_lots": lots_delta,
-                    "lot_size": lot_size, "lot_source": lot_source,
-                    "amount_rub": qty_delta * price,
-                    "priority": 4, "constraints_hit": "",
-                })
+    df_rec = pd.DataFrame(recs, columns=REC_COLS) if recs else empty_df(REC_COLS)
 
-    # --- Детальная таблица портфеля ---
-    portfolio_details = build_portfolio_details(
-        date, holdings, latest_stock_prices, latest_bond_prices,
-        stock_ranking, ofz_ranking, corp_ranking, total_value, date_dt
-    )
+    # 15. Portfolio details (без служебных колонок)
+    df_details = df_pos.drop(columns=["_clean_value", "_pnl_pct", "_holding_days"], errors="ignore")
+    df_details = df_details[DETAIL_COLS]
 
-    return snapshot, pd.DataFrame(recommendations), pd.DataFrame(outsiders), portfolio_details
+    return snapshot, df_rec, df_out, df_details
 
 
 # ============================================================================
 # Точка входа
 # ============================================================================
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list = None) -> int:
+    import argparse
     ap = argparse.ArgumentParser(description="Module 3: оценка портфеля (изолированный запуск)")
-    ap.add_argument("--date", default="", help="Дата расчёта YYYY-MM-DD")
-    ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Путь к config.yaml")
-    ap.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR), help="Папка с входными CSV")
-    ap.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Папка с выходами")
+    ap.add_argument("--date", default="")
+    ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    ap.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR))
+    ap.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     args = ap.parse_args(argv)
 
     project_root = Path(__file__).resolve().parent.parent
-    resolve = lambda p: Path(p) if Path(p).is_absolute() else project_root / p
-    config_path = resolve(args.config)
-    data_dir = resolve(args.data_dir)
-    output_dir = resolve(args.output_dir)
+    config_path = Path(args.config) if Path(args.config).is_absolute() else project_root / args.config
+    data_dir = Path(args.data_dir) if Path(args.data_dir).is_absolute() else project_root / args.data_dir
+    output_dir = Path(args.output_dir) if Path(args.output_dir).is_absolute() else project_root / args.output_dir
 
     data_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -621,23 +825,17 @@ def main(argv: list[str] | None = None) -> int:
     logger = setup_logging(date, output_dir)
     logger.info(f"=== Module 3 start: date={date}, data_dir={data_dir}, output_dir={output_dir} ===")
 
-    diagnostics: list[dict] = []
+    diagnostics = []
 
     try:
-        # Обновление сделок
-        fetch_and_save_deals(data_dir, logger)
-
-        # Проверка входных файлов
         holdings_path, created = check_required_files(data_dir, logger)
         if created:
             diagnostics.append({"code": "holdings_autogenerated", "details": str(holdings_path)})
 
-        # Выполнение оценки
         snapshot, rebalance, outsiders, portfolio_details = evaluate_portfolio(
             date, config, data_dir, output_dir, logger, diagnostics
         )
 
-        # Сохранение результатов
         save_csv(snapshot, output_dir / "portfolio_snapshot.csv")
         save_csv(rebalance, output_dir / "rebalance_recommendations.csv")
         save_csv(outsiders, output_dir / "outsiders.csv")
@@ -653,7 +851,6 @@ def main(argv: list[str] | None = None) -> int:
             logger.info(f"Total value: {row['total_value']:,.2f} RUB".replace(",", " "))
             logger.info(f"Stock: {row['stock_share_pct']:.2f}%, Bond: {row['bond_share_pct']:.2f}%, Cash: {row['cash_share_pct']:.2f}%")
 
-        # diagnostics
         if diagnostics:
             diag_path = output_dir / "diagnostics.csv"
             existing = pd.DataFrame()

@@ -2,10 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 Модуль 4. HTML-отчёт по рейтингам и портфелю.
-Входы : stock_ranking.csv, ofz_ranking.csv, corp_ranking.csv (из output_dir)
-        portfolio_details.csv (из output_dir, формируется module3)
-        stocks_universe.csv (из raw_dir — для ISIN и логотипов)
-Выход : report_<date>.html
+
+Собирает из data/output/*.csv и data/raw/portfolio_units.csv один самодостаточный HTML-файл.
+Входы:
+  - stock_ranking.csv, ofz_ranking.csv, corp_ranking.csv (из output_dir)
+  - portfolio_details.csv (из output_dir, формируется module3)
+  - portfolio_units.csv (из raw_dir — матрица субпортфелей)
+  - stocks_universe.csv (из raw_dir — для ISIN и логотипов)
+Выход: report_<date>.html
+
+Запуск:
+    python src/module4_report.py
+    python -m src.module4_report --date 2026-10-23 --open
 """
 from __future__ import annotations
 
@@ -25,12 +33,19 @@ import yaml
 # ============================================================================
 DEFAULT_INPUT_DIR = Path("data/output")
 DEFAULT_OUTPUT_DIR = Path("data/output")
+DEFAULT_RAW_DIR = Path("data/raw")
 DEFAULT_CONFIG_PATH = Path("config.yaml")
+
 LOGO_URL = "https://mybroker.storage.bcs.ru/FinInstrumentLogo/{isin}.png"
 
+# Авто-субпортфели (заполняются module1/module2)
+AUTO_SUBPORTFOLIOS = {"Дивиденды", "ОФЗ", "Корпораты"}
+
+# Колонки рейтингов
 STOCK_COLUMNS = [
     ("rank", "№", "int"),
     ("SECID", "Тикер", "ticker"),
+    ("name", "Название", "txt"),
     ("price", "Цена, ₽", "num"),
     ("dps_reg_next", "DPS, ₽", "num"),
     ("dps_source", "Источник", "txt"),
@@ -47,6 +62,7 @@ BOND_COLUMNS = [
     ("rank", "№", "int"),
     ("ISIN", "ISIN", "txt"),
     ("name", "Название", "txt"),
+    ("issuer", "Эмитент", "txt"),
     ("maturity_date", "Погашение", "date"),
     ("days_to_maturity", "Дней", "int"),
     ("coupon_rate_pct", "Купон, %", "pct"),
@@ -56,25 +72,27 @@ BOND_COLUMNS = [
     ("duration_years", "Дюрация", "num"),
     ("credit_rating", "Рейтинг", "txt"),
     ("eligible", "Допущена", "bool"),
-    ("exclusion_reason", "Исключена из-за", "txt"),
     ("target_weight_portfolio_pct", "Вес портф., %", "pct"),
 ]
 
+# Колонки портфеля (добавлены action и reason)
 PORTFOLIO_COLUMNS = [
-    ("SECID_or_ISIN", "Тикер/ISIN", "ticker"),
+    ("SECID_or_ISIN", "Тикер / ISIN", "ticker"),
     ("asset_type", "Тип", "txt"),
     ("quantity", "Кол-во", "num"),
-    ("current_value", "Сумма тек. ₽", "money"),
-    ("target_value", "Сумма план. ₽", "money"),
-    ("deviation_value", "Откл. ₽", "money"),
+    ("current_value", "Сумма текущая, ₽", "money"),
+    ("target_value", "Сумма плановая, ₽", "money"),
+    ("deviation_value", "Отклонение, ₽", "money"),
     ("current_weight_pct", "Доля текущ., %", "pct"),
     ("target_weight_pct", "Доля план., %", "pct"),
     ("cost_basis", "Себестоимость, ₽", "money"),
     ("accounting_profit", "Прибыль уч., ₽", "money"),
     ("accounting_profit_pct", "Прибыль уч., %", "pct"),
-    ("years_held", "Лет вл.", "num"),
-    ("dividend_sum", "Див. ₽", "money"),
-    ("dividend_pct", "Див. %", "pct"),
+    ("years_held", "Лет владения", "num"),
+    ("dividend_sum", "Дивиденды, ₽", "money"),
+    ("dividend_pct", "Дивиденды, %", "pct"),
+    ("action", "Действие", "action"),
+    ("reason", "Причина", "txt"),
 ]
 
 HEAT_COLUMNS = {"ay_pct", "ytm_gross_pct"}
@@ -126,20 +144,103 @@ def load_table(path: Path, logger: logging.Logger) -> pd.DataFrame:
 
 
 def load_isin_map(raw_dir: Path, logger: logging.Logger) -> dict:
-    """Загружает SECID -> ISIN из stocks_universe.csv."""
     universe_path = raw_dir / "stocks_universe.csv"
     if not universe_path.exists():
-        logger.warning(f"stocks_universe.csv не найден в {raw_dir} — логотипы для акций недоступны")
+        logger.warning(f"stocks_universe.csv не найден в {raw_dir}")
         return {}
     try:
         u = read_csv_flex(universe_path)
         if "SECID" in u.columns and "ISIN" in u.columns:
-            m = dict(zip(u["SECID"].astype(str), u["ISIN"].astype(str)))
+            m = dict(zip(u["SECID"].astype(str).str.upper(), u["ISIN"].astype(str)))
             logger.info(f"ISIN-мапа загружена: {len(m)} тикеров")
             return m
     except Exception as e:
         logger.warning(f"Не удалось загрузить ISIN-мапу: {e}")
     return {}
+
+
+# ============================================================================
+# Загрузка матрицы и расчёт сводки по субпортфелям
+# ============================================================================
+def load_portfolio_units(raw_dir: Path, logger: logging.Logger) -> pd.DataFrame:
+    path = raw_dir / "portfolio_units.csv"
+    if not path.exists():
+        logger.warning(f"Матрица {path.name} не найдена — сводка по субпортфелям недоступна")
+        return pd.DataFrame()
+    df = read_csv_flex(path)
+    if df.empty or "SECID" not in df.columns:
+        return pd.DataFrame()
+    df["SECID"] = df["SECID"].astype(str).str.strip().str.upper()
+    meta_cols = {"SECID", "asset_type"}
+    for c in df.columns:
+        if c not in meta_cols:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    logger.info(f"Матрица субпортфелей загружена: {len(df)} бумаг, {len(df.columns) - len(meta_cols)} субпортфелей")
+    return df
+
+
+def compute_subportfolio_summary(matrix: pd.DataFrame, portfolio_details: pd.DataFrame,
+                                  total_value: float, logger: logging.Logger) -> pd.DataFrame:
+    """Считает сводку по субпортфелям: кол-во бумаг, units, доля, стоимость."""
+    if matrix.empty:
+        return pd.DataFrame()
+
+    meta_cols = {"SECID", "asset_type"}
+    sub_cols = [c for c in matrix.columns if c not in meta_cols]
+    if not sub_cols:
+        return pd.DataFrame()
+
+    total_units_all = matrix[sub_cols].sum().sum()
+    if total_units_all == 0:
+        logger.warning("Сумма units в матрице = 0")
+        return pd.DataFrame()
+
+    # Подготовка portfolio_details
+    details = portfolio_details.copy()
+    if not details.empty and "SECID_or_ISIN" in details.columns:
+        details["SECID"] = details["SECID_or_ISIN"].astype(str).str.strip().str.upper()
+    else:
+        details = pd.DataFrame(columns=["SECID", "current_value"])
+
+    rows = []
+    for col in sub_cols:
+        sub_matrix = matrix[["SECID", col]].copy()
+        sub_matrix.columns = ["SECID", "units"]
+        sub_matrix = sub_matrix[sub_matrix["units"] > 0]
+
+        if sub_matrix.empty:
+            continue
+
+        merged = sub_matrix.merge(details[["SECID", "current_value"]], on="SECID", how="left")
+        merged["current_value"] = merged["current_value"].fillna(0)
+
+        total_units_in_sub = merged["units"].sum()
+        # Пропорциональное распределение стоимости
+        merged["weighted_value"] = merged["current_value"] * merged["units"] / total_units_in_sub
+
+        cost = merged["weighted_value"].sum()
+        n_papers = len(merged)
+        sum_units = int(total_units_in_sub)
+        share_pct = sum_units / total_units_all * 100
+        portfolio_share_pct = cost / total_value * 100 if total_value > 0 else 0
+
+        sub_type = "auto" if col in AUTO_SUBPORTFOLIOS else "manual"
+
+        rows.append({
+            "subportfolio": col,
+            "type": sub_type,
+            "n_papers": n_papers,
+            "sum_units": sum_units,
+            "share_pct": round(share_pct, 2),
+            "cost_rub": round(cost, 2),
+            "portfolio_share_pct": round(portfolio_share_pct, 2),
+        })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("share_pct", ascending=False).reset_index(drop=True)
+    logger.info(f"Сводка по субпортфелям: {len(df)} субпортфелей")
+    return df
 
 
 # ============================================================================
@@ -158,6 +259,11 @@ def fmt_cell(value, kind: str) -> tuple[str, str]:
     if kind == "bool":
         flag = str(value).strip().lower() in ("true", "1", "1.0", "yes", "да")
         return ("Да" if flag else "Нет"), ("1" if flag else "0")
+    if kind == "action":
+        s = str(value).strip().upper()
+        colors = {"SELL": "#cf222e", "BUY": "#1a7f37", "FREEZE": "#8a5a00", "HOLD": "#57606a", "NO_ACTION": "#57606a"}
+        color = colors.get(s, "#24292f")
+        return f'<span style="color:{color};font-weight:600">{html.escape(s)}</span>', html.escape(s)
     if kind in ("num", "pct", "int"):
         try:
             f = float(value)
@@ -204,7 +310,6 @@ def heat_style(value, vmax: float, vmin: float) -> str:
 
 
 def ticker_cell(secid, isin) -> str:
-    """Ячейка с логотипом и тикером (по аналогии с dividend_rating.py)."""
     secid_s = html.escape(str(secid))
     if not isin or _is_nan(isin) or str(isin).strip() == "":
         return secid_s
@@ -221,23 +326,25 @@ def ticker_cell(secid, isin) -> str:
 # ============================================================================
 def render_table(df: pd.DataFrame, columns: list, title: str, table_id: str,
                  logger: logging.Logger, eligible_col: str | None = None,
-                 isin_map: dict | None = None) -> str:
+                 isin_map: dict | None = None) -> tuple[str, str]:
+    """Возвращает (HTML панели без h2, label для вкладки со счётчиком)."""
     if df.empty:
-        return f'<section id="{table_id}" class="tabpane"><h2>{html.escape(title)}</h2>' \
-               f'<p class="empty">Нет данных</p></section>'
+        return (f'<section id="{table_id}" class="tabpane">'
+                f'<p class="empty">Нет данных</p></section>',
+                html.escape(title))
 
     cols = [(c, h, k) for c, h, k in columns if c in df.columns]
     missing = [c for c, _, _ in columns if c not in df.columns]
     if missing:
         logger.info(f"{title}: отсутствуют колонки {missing}")
 
-    # Счётчики в заголовке
+    # Счётчики
     total = len(df)
     eligible_n = total
     if eligible_col and eligible_col in df.columns:
         eligible_n = int(df[eligible_col].astype(str).str.strip().str.lower()
                          .isin(["true", "1"]).sum())
-    header = f"{html.escape(title)} <span class=\"cnt\">{eligible_n}/{total}</span>"
+    tab_label = f"{html.escape(title)} {eligible_n}/{total}"
 
     # Диапазоны для тепловой раскраски
     ranges = {}
@@ -274,13 +381,11 @@ def render_table(df: pd.DataFrame, columns: list, title: str, table_id: str,
                 style = heat_style(val, *ranges[c])
 
             if k == "ticker":
-                # Тикер с логотипом
                 secid = val
                 isin = None
                 if isin_map:
-                    # Для акций — SECID; для облигаций — ISIN
                     if c == "SECID":
-                        isin = isin_map.get(str(secid), "")
+                        isin = isin_map.get(str(secid).upper(), "")
                     elif c == "ISIN":
                         isin = secid
                 disp = ticker_cell(secid, isin)
@@ -294,9 +399,8 @@ def render_table(df: pd.DataFrame, columns: list, title: str, table_id: str,
 
         rows_html.append(f'<tr class="{" ".join(cls)}">{"".join(tds)}</tr>')
 
-    return f"""
+    panel_html = f"""
 <section id="{table_id}" class="tabpane">
-  <h2>{header}</h2>
   <input class="filter" type="text" placeholder="Фильтр…" oninput="filterRows(this,'{table_id}')">
   <div class="twrap">
     <table id="tbl_{table_id}">
@@ -305,27 +409,60 @@ def render_table(df: pd.DataFrame, columns: list, title: str, table_id: str,
     </table>
   </div>
 </section>"""
+    return panel_html, tab_label
+
+
+def render_subportfolio_summary(summary: pd.DataFrame) -> str:
+    if summary.empty:
+        return ""
+
+    head = "".join([
+        "<th>Субпортфель</th>",
+        "<th>Тип</th>",
+        "<th>Бумаг</th>",
+        "<th>Units</th>",
+        "<th>Доля, %</th>",
+        "<th>Стоимость, ₽</th>",
+        "<th>Доля портфеля, %</th>",
+    ])
+
+    rows_html = []
+    for _, row in summary.iterrows():
+        type_badge = '<span class="badge auto">auto</span>' if row["type"] == "auto" else '<span class="badge manual">manual</span>'
+        cells = [
+            f'<td><b>{html.escape(str(row["subportfolio"]))}</b></td>',
+            f'<td>{type_badge}</td>',
+            f'<td class="num">{row["n_papers"]}</td>',
+            f'<td class="num">{row["sum_units"]}</td>',
+            f'<td class="num">{row["share_pct"]:.2f}</td>',
+            f'<td class="num">{fmt_money(row["cost_rub"])}</td>',
+            f'<td class="num">{row["portfolio_share_pct"]:.2f}</td>',
+        ]
+        rows_html.append(f'<tr>{"".join(cells)}</tr>')
+
+    return f"""
+<div class="summary-block">
+  <h3>Сводка по субпортфелям</h3>
+  <div class="twrap">
+    <table class="summary-table">
+      <thead><tr>{head}</tr></thead>
+      <tbody>{''.join(rows_html)}</tbody>
+    </table>
+  </div>
+</div>
+"""
 
 
 def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
-                     default_sort: str = "deviation_value",
-                     default_asc: bool = True) -> str:
+                     summary: pd.DataFrame) -> tuple[str, str]:
+    """Возвращает (HTML панели без h2, label для вкладки со счётчиком)."""
     if df.empty:
-        return '<section id="pane_portfolio" class="tabpane"><h2>Портфель</h2>' \
-               '<p class="empty">Нет данных</p></section>'
-
-    # Предустановленная сортировка по default_sort (NaN — в конец)
-    if default_sort in df.columns:
-        df = df.copy()
-        df = df.sort_values(
-            default_sort,
-            ascending=default_asc,
-            na_position="last",
-            key=lambda s: pd.to_numeric(s, errors="coerce") if s.name == default_sort else s
-        ).reset_index(drop=True)
+        return ('<section id="pane_portfolio" class="tabpane">'
+                '<p class="empty">Нет данных</p></section>',
+                'Портфель')
 
     cols = [(c, h, k) for c, h, k in PORTFOLIO_COLUMNS if c in df.columns]
-    
+
     head = "".join(
         f'<th data-kind="{k}" onclick="sortTable(this)">{html.escape(h)}'
         f'<span class="arr"></span></th>'
@@ -336,14 +473,29 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
     for _, row in df.iterrows():
         secid = row["SECID_or_ISIN"]
         asset_type = str(row.get("asset_type", ""))
-        # Для облигаций ISIN = SECID_or_ISIN; для акций — из мапы
-        isin = isin_map.get(str(secid), "") if asset_type == "stock" else secid
+        isin = isin_map.get(str(secid).upper(), "") if asset_type == "stock" else secid
+
+        # Определяем класс строки по action
+        action = str(row.get("action", "")).strip().upper()
+        cls = []
+        if action == "SELL":
+            cls.append("row-sell")
+        elif action == "FREEZE":
+            cls.append("row-freeze")
+
+        # Флаг "вне плана"
+        target_w = row.get("target_weight_pct", 0)
+        try:
+            target_w_f = float(target_w)
+        except (TypeError, ValueError):
+            target_w_f = 0.0
+        if target_w_f <= 0:
+            cls.append("row-out-of-plan")
 
         tds = []
         for c, _, k in cols:
             val = row.get(c)
             style = ""
-            # Подсветка отклонений и прибыли
             if c in ("deviation_value", "accounting_profit", "accounting_profit_pct"):
                 try:
                     f = float(val)
@@ -360,11 +512,11 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
                 tds.append(f'<td data-v="{raw}">{disp}</td>')
             else:
                 disp, raw = fmt_cell_ext(val, k)
-                num = k in ("num", "pct", "int", "money")
+                num = k in ("num", "pct", "int", "money", "action")
                 td_cls = "num" if num else ""
                 tds.append(f'<td class="{td_cls}" style="{style}" data-v="{raw}">{disp}</td>')
 
-        rows_html.append(f'<tr>{"".join(tds)}</tr>')
+        rows_html.append(f'<tr class="{" ".join(cls)}">{"".join(tds)}</tr>')
 
     # Итоги по портфелю
     total_value = pd.to_numeric(df.get("current_value", pd.Series()), errors="coerce").sum()
@@ -383,10 +535,26 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
     </div>
     """
 
-    return f"""
+    # Сводка по субпортфелям
+    subportfolio_summary_html = render_subportfolio_summary(summary)
+
+    # Переключатель "показать позиции вне плана"
+    toggle_html = """
+    <div class="toggle-block">
+      <label>
+        <input type="checkbox" id="toggleOutOfPlan" onchange="toggleOutOfPlanRows(this, 'pane_portfolio')">
+        Показать позиции вне плана (target_weight = 0)
+      </label>
+    </div>
+    """
+
+    tab_label = f"Портфель {len(df)}"
+    
+    panel_html = f"""
 <section id="pane_portfolio" class="tabpane">
-  <h2>Портфель <span class="cnt">({len(df)} позиций)</span></h2>
   {summary_html}
+  {subportfolio_summary_html}
+  {toggle_html}
   <div class="twrap">
     <table id="tbl_pane_portfolio">
       <thead><tr>{head}</tr></thead>
@@ -394,6 +562,7 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
     </table>
   </div>
 </section>"""
+    return panel_html, tab_label
 
 
 # ============================================================================
@@ -429,6 +598,9 @@ tbody tr:hover{background:#f0f6ff}
 .row-stop{color:#8b1a1a;background:#fff5f5}
 .row-ok td:first-child{box-shadow:inset 3px 0 0 #2ea043}
 .row-out{opacity:.55}
+.row-sell{background:#ffebe9}
+.row-freeze{background:#fff8c5}
+.row-out-of-plan{opacity:.45;font-style:italic}
 .empty{color:#57606a}
 .tk{display:inline-flex;align-items:center;gap:6px}
 .logo{width:20px;height:20px;flex:none;border-radius:50%;object-fit:contain;
@@ -436,7 +608,19 @@ tbody tr:hover{background:#f0f6ff}
 .pf-summary{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:14px;
             padding:12px 16px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px}
 .pf-summary div{font-size:14px}
-@media print{.filter,nav{display:none}.tabpane{display:block!important;page-break-before:always}}
+.summary-block{margin-bottom:14px}
+.summary-block h3{margin:0 0 8px;font-size:14px;color:#57606a}
+.summary-table{font-size:13px}
+.summary-table th{background:#eaeef2}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge.auto{background:#ddf4ff;color:#0969da}
+.badge.manual{background:#fff8c5;color:#8a5a00}
+.toggle-block{margin-bottom:10px;padding:8px 12px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px}
+.toggle-block label{cursor:pointer;font-size:13px}
+.toggle-block input{margin-right:6px}
+@media print{.filter,nav,.toggle-block{display:none}.tabpane{display:block!important;page-break-before:always}}
+nav button{white-space:nowrap}
+nav button{font-size:13px}
 """
 
 JS = """
@@ -464,21 +648,48 @@ function sortTable(th){
     const va=a.cells[idx].dataset.v??'', vb=b.cells[idx].dataset.v??'';
     let r;
     if(['num','pct','int','money'].includes(kind)){
-      const na=parseFloat(String(va).replace(/\\s/g,'').replace('₽','')),
-            nb=parseFloat(String(vb).replace(/\\s/g,'').replace('₽',''));
+      const na=parseFloat(String(va).replace(/\\s/g,'').replace('₽','').replace('%','')),
+            nb=parseFloat(String(vb).replace(/\\s/g,'').replace('₽','').replace('%',''));
       r=(isNaN(na)?-Infinity:na)-(isNaN(nb)?-Infinity:nb);
     } else r=va.localeCompare(vb,'ru');
     return asc?r:-r;
   });
   rows.forEach(r=>tb.appendChild(r));
 }
+function toggleOutOfPlanRows(checkbox, pid){
+  const rows = document.querySelectorAll('#tbl_'+pid+' tbody tr');
+  rows.forEach(row => {
+    if (checkbox.checked) {
+      row.style.display = '';
+    } else {
+      if (row.classList.contains('row-out-of-plan')) {
+        row.style.display = 'none';
+      } else {
+        row.style.display = '';
+      }
+    }
+  });
+}
 document.addEventListener('DOMContentLoaded',()=>{
   const b=document.querySelector('nav button'); if(b) b.click();
+  // Скрываем позиции вне плана по умолчанию
+  const cb = document.getElementById('toggleOutOfPlan');
+  if (cb) toggleOutOfPlanRows(cb, 'pane_portfolio');
+  // Сортировка портфеля по deviation_value (колонка 5, 0-based)
+  const tbl = document.getElementById('tbl_pane_portfolio');
+  if (tbl) {
+    const ths = tbl.tHead.rows[0].cells;
+    if (ths[5]) sortTable(ths[5]);
+  }
 });
 """
 
 
-def build_html(date: str, panes: str) -> str:
+def build_html(date: str, panes: str, tab_labels: list[str], tab_ids: list[str]) -> str:
+    nav_buttons = "".join(
+        f'<button onclick="showTab(\'{tid}\',this)">{label}</button>'
+        for tid, label in zip(tab_ids, tab_labels)
+    )
     return f"""<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <title>Отчёт {date}</title><style>{CSS}</style></head>
@@ -486,10 +697,7 @@ def build_html(date: str, panes: str) -> str:
 <header><div class="sub">Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div></header>
 <main>
 <nav>
-  <button onclick="showTab('pane_stocks',this)">Акции</button>
-  <button onclick="showTab('pane_ofz',this)">ОФЗ</button>
-  <button onclick="showTab('pane_corp',this)">Корпораты</button>
-  <button onclick="showTab('pane_portfolio',this)">Портфель</button>
+  {nav_buttons}
 </nav>
 {panes}
 </main>
@@ -500,7 +708,7 @@ def build_html(date: str, panes: str) -> str:
 # ============================================================================
 # Основная функция
 # ============================================================================
-def build_report(date: str, input_dir: Path, output_dir: Path,
+def build_report(date: str, input_dir: Path, output_dir: Path, raw_dir: Path,
                  logger: logging.Logger) -> Path:
     stocks = load_table(input_dir / "stock_ranking.csv", logger)
     ofz = load_table(input_dir / "ofz_ranking.csv", logger)
@@ -516,22 +724,38 @@ def build_report(date: str, input_dir: Path, output_dir: Path,
                 ofz = df[df["bond_type"] == "ofz"].reset_index(drop=True)
                 corp = df[df["bond_type"] == "corporate"].reset_index(drop=True)
 
-    # ISIN-мапа из stocks_universe (raw_dir = input_dir.parent / "raw")
-    raw_dir = input_dir.parent / "raw"
+    # ISIN-мапа
     isin_map = load_isin_map(raw_dir, logger)
 
-    panes = (
-        render_table(stocks, STOCK_COLUMNS, "Акции", "pane_stocks", logger,
-                     eligible_col="eligible_for_buy", isin_map=isin_map)
-        + render_table(ofz, BOND_COLUMNS, "ОФЗ", "pane_ofz", logger,
-                       eligible_col="eligible", isin_map=isin_map)
-        + render_table(corp, BOND_COLUMNS, "Корпораты", "pane_corp", logger,
-                       eligible_col="eligible", isin_map=isin_map)
-        + render_portfolio(portfolio, isin_map, logger)
-    )
+    # Матрица субпортфелей и сводка
+    matrix = load_portfolio_units(raw_dir, logger)
+
+    # Общая стоимость портфеля для расчёта сводки
+    total_value = 0.0
+    if not portfolio.empty and "current_value" in portfolio.columns:
+        total_value = pd.to_numeric(portfolio["current_value"], errors="coerce").sum()
+
+    summary = compute_subportfolio_summary(matrix, portfolio, total_value, logger) if not matrix.empty else pd.DataFrame()
+
+    # Каждая render_* теперь возвращает (panel_html, tab_label)
+    stocks_panel, stocks_label = render_table(
+        stocks, STOCK_COLUMNS, "Акции", "pane_stocks", logger,
+        eligible_col="eligible_for_buy", isin_map=isin_map)
+    ofz_panel, ofz_label = render_table(
+        ofz, BOND_COLUMNS, "ОФЗ", "pane_ofz", logger,
+        eligible_col="eligible", isin_map=isin_map)
+    corp_panel, corp_label = render_table(
+        corp, BOND_COLUMNS, "Корпораты", "pane_corp", logger,
+        eligible_col="eligible", isin_map=isin_map)
+    portfolio_panel, portfolio_label = render_portfolio(
+        portfolio, isin_map, logger, summary)
+
+    panes = stocks_panel + ofz_panel + corp_panel + portfolio_panel
+    tab_labels = [stocks_label, ofz_label, corp_label, portfolio_label]
+    tab_ids = ["pane_stocks", "pane_ofz", "pane_corp", "pane_portfolio"]
 
     out = output_dir / f"report_{date}.html"
-    out.write_text(build_html(date, panes), encoding="utf-8")
+    out.write_text(build_html(date, panes, tab_labels, tab_ids), encoding="utf-8")
     logger.info(f"HTML-отчёт сохранён: {out}")
     return out
 
@@ -546,14 +770,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     ap.add_argument("--input-dir", default=str(DEFAULT_INPUT_DIR))
     ap.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
+    ap.add_argument("--raw-dir", default=str(DEFAULT_RAW_DIR))
     ap.add_argument("--open", action="store_true", help="Открыть отчёт в браузере")
     args = ap.parse_args(argv)
 
     root = Path(__file__).resolve().parent.parent
     resolve = lambda p: Path(p) if Path(p).is_absolute() else root / p
-    config_path, input_dir, output_dir = (
-        resolve(args.config), resolve(args.input_dir), resolve(args.output_dir)
-    )
+    config_path = resolve(args.config)
+    input_dir = resolve(args.input_dir)
+    output_dir = resolve(args.output_dir)
+    raw_dir = resolve(args.raw_dir)
 
     cfg = load_config(config_path)
     d = cfg.get("date", "today")
@@ -565,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
     logger = setup_logging(date, output_dir)
     logger.info(f"=== Module 4 start: date={date} ===")
     try:
-        out = build_report(date, input_dir, output_dir, logger)
+        out = build_report(date, input_dir, output_dir, raw_dir, logger)
         if args.open:
             if sys.platform == "win32":
                 import os

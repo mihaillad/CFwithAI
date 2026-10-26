@@ -1,5 +1,7 @@
 /venv/
-/data/
+/data/output/
+/data/raw/portfolio_holdings.csv
+/data/raw/deals.csv
 *.log
 .vscode
 

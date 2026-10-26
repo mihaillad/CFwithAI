@@ -422,7 +422,7 @@ def fetch_and_save_stocks_universe(data_dir: Path, logger: logging.Logger) -> No
     url = "https://iss.moex.com/iss/engines/stock/markets/shares/securities.json"
     params = {
         "iss.meta": "off",
-        "securities.columns": "SECID,SHORTNAME,LATNAME,LOT_SIZE,ISIN,LISTLEVEL,BOARDID"
+        "securities.columns": "SECID,SHORTNAME,LATNAME,LOTSIZE,ISIN,LISTLEVEL,BOARDID"
     }
     try:
         r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
@@ -439,7 +439,7 @@ def fetch_and_save_stocks_universe(data_dir: Path, logger: logging.Logger) -> No
     data = payload["securities"]["data"]
     df = pd.DataFrame(data, columns=cols)
 
-    df["LOT_SIZE"] = pd.to_numeric(df["LOT_SIZE"], errors="coerce").fillna(1).astype(int)
+    df["LOTSIZE"] = pd.to_numeric(df["LOTSIZE"], errors="coerce").fillna(1).astype(int)
     df["LISTLEVEL"] = pd.to_numeric(df["LISTLEVEL"], errors="coerce").fillna(-1)
 
     df = df.sort_values(by=["LISTLEVEL", "BOARDID"], ascending=[False, True])
@@ -451,7 +451,7 @@ def fetch_and_save_stocks_universe(data_dir: Path, logger: logging.Logger) -> No
         "issuer": df_unique["SHORTNAME"],
         "name": df_unique["SHORTNAME"],
         "sector": "Unknown",
-        "lot_size": df_unique["LOT_SIZE"],
+        "LOTSIZE": df_unique["LOTSIZE"],
         "board": df_unique["BOARDID"],
         "lot_as_of": datetime.now().strftime("%Y-%m-%d")
     })
@@ -687,7 +687,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
 
     for secid in active_secids:
         uni_row = universe_dict.get(secid, {})
-        lot_size = int(uni_row.get('lot_size', 1)) if uni_row else 1
+        LOTSIZE = int(uni_row.get('LOTSIZE', 1)) if uni_row else 1
 
         if secid not in latest_prices.index:
             excluded.append({'date': date, 'SECID': secid,
@@ -784,7 +784,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
             'eps_growth_3y_pct': eps_3y,
             'stop_flag': stop_flag,
             'stop_reason': ";".join(stop_reasons),
-            'lot_size': lot_size
+            'LOTSIZE': LOTSIZE
         })
 
     # ------------------------------------------------------------------

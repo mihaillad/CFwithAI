@@ -39,7 +39,7 @@ DEFAULT_CONFIG_PATH = Path("config.yaml")
 LOGO_URL = "https://mybroker.storage.bcs.ru/FinInstrumentLogo/{isin}.png"
 
 # Авто-субпортфели (заполняются module1/module2)
-AUTO_SUBPORTFOLIOS = {"Дивиденды", "ОФЗ", "Корпораты"}
+AUTO_SUBPORTFOLIOS = {"Дивиденды", "ОФЗ", "Длинные ОФЗ", "Корпораты"}
 
 # Колонки рейтингов
 STOCK_COLUMNS = [
@@ -55,7 +55,7 @@ STOCK_COLUMNS = [
     ("dy_gross_pct", "DY, %", "pct"),
     ("stop_flag", "Стоп", "bool"),
     ("target_weight_portfolio_pct", "Вес портф., %", "pct"),
-    ("lot_size", "Лот", "int"),
+    ("LOTSIZE", "Лот", "int"),
 ]
 
 BOND_COLUMNS = [
@@ -80,17 +80,17 @@ PORTFOLIO_COLUMNS = [
     ("SECID_or_ISIN", "Тикер / ISIN", "ticker"),
     ("asset_type", "Тип", "txt"),
     ("quantity", "Кол-во", "num"),
-    ("current_value", "Сумма текущая, ₽", "money"),
-    ("target_value", "Сумма плановая, ₽", "money"),
+    ("current_value", "∑ тек., ₽", "money"),
+    ("target_value", "∑ план., ₽", "money"),
     ("deviation_value", "Отклонение, ₽", "money"),
-    ("current_weight_pct", "Доля текущ., %", "pct"),
+    ("current_weight_pct", "Доля тек., %", "pct"),
     ("target_weight_pct", "Доля план., %", "pct"),
-    ("cost_basis", "Себестоимость, ₽", "money"),
+    ("cost_basis", "С/сть, ₽", "money"),
     ("accounting_profit", "Прибыль уч., ₽", "money"),
     ("accounting_profit_pct", "Прибыль уч., %", "pct"),
-    ("years_held", "Лет владения", "num"),
-    ("dividend_sum", "Дивиденды, ₽", "money"),
-    ("dividend_pct", "Дивиденды, %", "pct"),
+    ("years_held", "Лет", "num"),
+    ("dividend_sum", "Див., ₽", "money"),
+    ("dividend_pct", "Див., %", "pct"),
     ("action", "Действие", "action"),
     ("reason", "Причина", "txt"),
 ]
@@ -552,8 +552,6 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
     
     panel_html = f"""
 <section id="pane_portfolio" class="tabpane">
-  {summary_html}
-  {subportfolio_summary_html}
   {toggle_html}
   <div class="twrap">
     <table id="tbl_pane_portfolio">
@@ -561,6 +559,8 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
       <tbody>{''.join(rows_html)}</tbody>
     </table>
   </div>
+  {summary_html}
+  {subportfolio_summary_html}
 </section>"""
     return panel_html, tab_label
 
@@ -711,10 +711,32 @@ def build_html(date: str, panes: str, tab_labels: list[str], tab_ids: list[str])
 def build_report(date: str, input_dir: Path, output_dir: Path, raw_dir: Path,
                  logger: logging.Logger) -> Path:
     stocks = load_table(input_dir / "stock_ranking.csv", logger)
-    ofz = load_table(input_dir / "ofz_ranking.csv", logger)
     corp = load_table(input_dir / "corp_ranking.csv", logger)
     portfolio = load_table(output_dir / "portfolio_details.csv", logger)
+    # Загрузка двух рейтингов ОФЗ и объединение
+    core_ofz = load_table(input_dir / "core_ofz_ranking.csv", logger)
+    long_ofz = load_table(input_dir / "long_ofz_ranking.csv", logger)
 
+    # Объединение в один DataFrame
+    ofz_parts = []
+    if not core_ofz.empty:
+        ofz_parts.append(core_ofz)
+    if not long_ofz.empty:
+        ofz_parts.append(long_ofz)
+
+    if ofz_parts:
+        ofz = pd.concat(ofz_parts, ignore_index=True)
+        # Сортировка по current_yield_pct DESC (как в Module 2)
+        if "current_yield_pct" in ofz.columns:
+            ofz["current_yield_pct"] = pd.to_numeric(ofz["current_yield_pct"], errors="coerce")
+            ofz = ofz.sort_values("current_yield_pct", ascending=False).reset_index(drop=True)
+        # Перенумерация rank
+        ofz["rank"] = range(1, len(ofz) + 1)
+        logger.info(f"ОФЗ объединены: core_ofz={len(core_ofz)}, long_ofz={len(long_ofz)}, итого={len(ofz)}")
+    else:
+        ofz = pd.DataFrame()
+    
+    
     # Фоллбэк для старого bond_ranking.csv
     if ofz.empty and corp.empty:
         legacy = input_dir / "bond_ranking.csv"

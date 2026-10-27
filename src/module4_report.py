@@ -78,7 +78,7 @@ BOND_COLUMNS = [
 # Колонки портфеля (добавлены action и reason)
 PORTFOLIO_COLUMNS = [
     ("SECID_or_ISIN", "Тикер / ISIN", "ticker"),
-    ("asset_type", "Тип", "txt"),
+    ("name", "Название", "txt"),
     ("quantity", "Кол-во", "num"),
     ("current_value", "∑ тек., ₽", "money"),
     ("target_value", "∑ план., ₽", "money"),
@@ -158,6 +158,32 @@ def load_isin_map(raw_dir: Path, logger: logging.Logger) -> dict:
         logger.warning(f"Не удалось загрузить ISIN-мапу: {e}")
     return {}
 
+def load_name_map(raw_dir: Path, logger: logging.Logger) -> dict:
+    """Собирает маппинг SECID/ISIN -> name из stocks_universe, bonds_OFZ, bonds_CORPS."""
+    name_map = {}
+    # Акции: SECID -> name
+    u_path = raw_dir / "stocks_universe.csv"
+    if u_path.exists():
+        try:
+            u = read_csv_flex(u_path)
+            if "SECID" in u.columns and "name" in u.columns:
+                for secid, name in zip(u["SECID"], u["name"]):
+                    name_map[str(secid).strip().upper()] = str(name)
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить имена акций: {e}")
+    # Облигации: ISIN -> name
+    for fn in ("bonds_OFZ.csv", "bonds_CORPS.csv"):
+        p = raw_dir / fn
+        if p.exists():
+            try:
+                d = read_csv_flex(p)
+                if "ISIN" in d.columns and "name" in d.columns:
+                    for isin, name in zip(d["ISIN"], d["name"]):
+                        name_map[str(isin).strip().upper()] = str(name)
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить имена из {fn}: {e}")
+    logger.info(f"Маппинг имён загружен: {len(name_map)} бумаг")
+    return name_map
 
 # ============================================================================
 # Загрузка матрицы и расчёт сводки по субпортфелям
@@ -456,30 +482,50 @@ def render_subportfolio_summary(summary: pd.DataFrame) -> str:
 </div>
 """
 
+def render_summary_tab(summary: pd.DataFrame, total_value: float, total_cost: float,
+                       total_profit: float, total_profit_pct: float, total_div: float) -> tuple[str, str]:
+    """Отдельная вкладка 'Сводно': общие итоги + сводка по субпортфелям."""
+    profit_color = "#1a7f37" if total_profit >= 0 else "#cf222e"
+    pf_summary_html = f"""
+    <div class="pf-summary">
+    <div><b>Стоимость:</b> {fmt_money(total_value)}</div>
+    <div><b>Себестоимость:</b> {fmt_money(total_cost)}</div>
+    <div><b>Прибыль:</b> <span style="color:{profit_color}">{fmt_money(total_profit)} ({total_profit_pct:+.2f}%)</span></div>
+    <div><b>Ожидаемые дивиденды:</b> {fmt_money(total_div)}</div>
+    </div>
+    """
+    sub_summary_html = render_subportfolio_summary(summary)
+    panel_html = f"""
+    <section id="pane_summary" class="tabpane">
+    {pf_summary_html}
+    {sub_summary_html}
+    </section>"""
+    return panel_html, "Сводно"
 
-def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
-                     summary: pd.DataFrame) -> tuple[str, str]:
+def render_portfolio(df: pd.DataFrame, isin_map: dict, name_map: dict,
+                     logger: logging.Logger) -> tuple[str, str]:
     """Возвращает (HTML панели без h2, label для вкладки со счётчиком)."""
     if df.empty:
         return ('<section id="pane_portfolio" class="tabpane">'
                 '<p class="empty">Нет данных</p></section>',
                 'Портфель')
 
-    cols = [(c, h, k) for c, h, k in PORTFOLIO_COLUMNS if c in df.columns]
+    # Добавляем колонку name из маппинга
+    df = df.copy()
+    df["name"] = df["SECID_or_ISIN"].astype(str).str.strip().str.upper().map(name_map).fillna("")
 
+    cols = [(c, h, k) for c, h, k in PORTFOLIO_COLUMNS if c in df.columns]
     head = "".join(
         f'<th data-kind="{k}" onclick="sortTable(this)">{html.escape(h)}'
         f'<span class="arr"></span></th>'
         for _, h, k in cols
     )
-
     rows_html = []
     for _, row in df.iterrows():
         secid = row["SECID_or_ISIN"]
         asset_type = str(row.get("asset_type", ""))
         isin = isin_map.get(str(secid).upper(), "") if asset_type == "stock" else secid
 
-        # Определяем класс строки по action
         action = str(row.get("action", "")).strip().upper()
         cls = []
         if action == "SELL":
@@ -487,7 +533,6 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
         elif action == "FREEZE":
             cls.append("row-freeze")
 
-        # Флаг "вне плана"
         target_w = row.get("target_weight_pct", 0)
         try:
             target_w_f = float(target_w)
@@ -509,7 +554,6 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
                         style = "color:#cf222e;font-weight:600;"
                 except (TypeError, ValueError):
                     pass
-
             if k == "ticker":
                 disp = ticker_cell(secid, isin)
                 raw = html.escape(str(secid))
@@ -519,55 +563,29 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, logger: logging.Logger,
                 num = k in ("num", "pct", "int", "money", "action")
                 td_cls = "num" if num else ""
                 tds.append(f'<td class="{td_cls}" style="{style}" data-v="{raw}">{disp}</td>')
-
         rows_html.append(f'<tr class="{" ".join(cls)}">{"".join(tds)}</tr>')
-
-    # Итоги по портфелю
-    total_value = pd.to_numeric(df.get("current_value", pd.Series()), errors="coerce").sum()
-    total_cost = pd.to_numeric(df.get("cost_basis", pd.Series()), errors="coerce").sum()
-    total_profit = total_value - total_cost
-    total_profit_pct = ((total_value / total_cost) - 1) * 100 if total_cost > 0 else 0
-    total_div = pd.to_numeric(df.get("dividend_sum", pd.Series()), errors="coerce").sum()
-    profit_color = "#1a7f37" if total_profit >= 0 else "#cf222e"
-
-    summary_html = f"""
-    <div class="pf-summary">
-      <div><b>Стоимость:</b> {fmt_money(total_value)}</div>
-      <div><b>Себестоимость:</b> {fmt_money(total_cost)}</div>
-      <div><b>Прибыль:</b> <span style="color:{profit_color}">{fmt_money(total_profit)} ({total_profit_pct:+.2f}%)</span></div>
-      <div><b>Ожидаемые дивиденды:</b> {fmt_money(total_div)}</div>
-    </div>
-    """
-
-    # Сводка по субпортфелям
-    subportfolio_summary_html = render_subportfolio_summary(summary)
 
     # Переключатель "показать позиции вне плана"
     toggle_html = """
     <div class="toggle-block">
-      <label>
-        <input type="checkbox" id="toggleOutOfPlan" onchange="toggleOutOfPlanRows(this, 'pane_portfolio')">
-        Показать позиции вне плана (target_weight = 0)
-      </label>
+    <label>
+    <input type="checkbox" id="toggleOutOfPlan" onchange="toggleOutOfPlanRows(this, 'pane_portfolio')">
+    Показать позиции вне плана (target_weight = 0)
+    </label>
     </div>
     """
-
     tab_label = f"Портфель {len(df)}"
-    
     panel_html = f"""
-<section id="pane_portfolio" class="tabpane">
-  {toggle_html}
-  <div class="twrap">
+    <section id="pane_portfolio" class="tabpane">
+    {toggle_html}
+    <div class="twrap">
     <table id="tbl_pane_portfolio">
-      <thead><tr>{head}</tr></thead>
-      <tbody>{''.join(rows_html)}</tbody>
+    <thead><tr>{head}</tr></thead>
+    <tbody>{''.join(rows_html)}</tbody>
     </table>
-  </div>
-  {summary_html}
-  {subportfolio_summary_html}
-</section>"""
+    </div>
+    </section>"""
     return panel_html, tab_label
-
 
 # ============================================================================
 # HTML-каркас
@@ -577,7 +595,7 @@ CSS = """
 body{margin:0;font:14px/1.45 -apple-system,Segoe UI,Roboto,Arial,sans-serif;
      background:#f6f8fa;color:#24292f}
 header{background:#24292f;color:#fff;padding:12px 24px}
-header .sub{opacity:.85;font-size:13px}
+header .sub{opacity:.65;font-size:11px;font-weight:300;letter-spacing:.3px}
 main{padding:20px 24px;max-width:1700px;margin:0 auto}
 nav{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid #d0d7de}
 nav button{border:1px solid #d0d7de;border-bottom:none;background:#eaeef2;
@@ -750,20 +768,30 @@ def build_report(date: str, input_dir: Path, output_dir: Path, raw_dir: Path,
                 ofz = df[df["bond_type"] == "ofz"].reset_index(drop=True)
                 corp = df[df["bond_type"] == "corporate"].reset_index(drop=True)
 
-    # ISIN-мапа
+    # ISIN-мапа и Name-мапа
     isin_map = load_isin_map(raw_dir, logger)
+    name_map = load_name_map(raw_dir, logger)
 
-    # Матрица субпортфелей и сводка
+    # Матрица субпортфелей
     matrix = load_portfolio_units(raw_dir, logger)
 
-    # Общая стоимость портфеля для расчёта сводки
+    # Итоги портфеля (для вкладки "Сводно")
     total_value = 0.0
-    if not portfolio.empty and "current_value" in portfolio.columns:
-        total_value = pd.to_numeric(portfolio["current_value"], errors="coerce").sum()
+    total_cost = 0.0
+    total_div = 0.0
+    if not portfolio.empty:
+        total_value = pd.to_numeric(portfolio.get("current_value", pd.Series()), errors="coerce").sum()
+        total_cost = pd.to_numeric(portfolio.get("cost_basis", pd.Series()), errors="coerce").sum()
+        total_div = pd.to_numeric(portfolio.get("dividend_sum", pd.Series()), errors="coerce").sum()
+    total_profit = total_value - total_cost
+    total_profit_pct = ((total_value / total_cost) - 1) * 100 if total_cost > 0 else 0
 
     summary = compute_subportfolio_summary(matrix, portfolio, total_value, logger) if not matrix.empty else pd.DataFrame()
 
-    # Каждая render_* теперь возвращает (panel_html, tab_label)
+    # Рендер вкладок
+    portfolio_panel, portfolio_label = render_portfolio(portfolio, isin_map, name_map, logger)
+    summary_panel, summary_label = render_summary_tab(
+        summary, total_value, total_cost, total_profit, total_profit_pct, total_div)
     stocks_panel, stocks_label = render_table(
         stocks, STOCK_COLUMNS, "Акции", "pane_stocks", logger,
         eligible_col="eligible_for_buy", isin_map=isin_map)
@@ -773,12 +801,13 @@ def build_report(date: str, input_dir: Path, output_dir: Path, raw_dir: Path,
     corp_panel, corp_label = render_table(
         corp, BOND_COLUMNS, "Корпораты", "pane_corp", logger,
         eligible_col="eligible", isin_map=isin_map)
-    portfolio_panel, portfolio_label = render_portfolio(
-        portfolio, isin_map, logger, summary)
 
-    panes = stocks_panel + ofz_panel + corp_panel + portfolio_panel
-    tab_labels = [stocks_label, ofz_label, corp_label, portfolio_label]
-    tab_ids = ["pane_stocks", "pane_ofz", "pane_corp", "pane_portfolio"]
+    # Порядок: Портфель, Сводно, Акции, ОФЗ, Корпораты
+    panes = portfolio_panel + summary_panel + stocks_panel + ofz_panel + corp_panel
+    tab_labels = [portfolio_label, summary_label, stocks_label, ofz_label, corp_label]
+    tab_ids = ["pane_portfolio", "pane_summary", "pane_stocks", "pane_ofz", "pane_corp"]
+
+
 
     out = output_dir / f"report_{date}.html"
     out.write_text(build_html(date, panes, tab_labels, tab_ids), encoding="utf-8")

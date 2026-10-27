@@ -175,6 +175,10 @@ def load_portfolio_units(raw_dir: Path, logger: logging.Logger) -> pd.DataFrame:
     for c in df.columns:
         if c not in meta_cols:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    # Свертка по SECID и asset_type с суммированием всех остальных полей
+    df = ( df.groupby(["SECID", "asset_type"], as_index=False) .sum(numeric_only=True) )
+    df.to_csv(path, sep=";", index=False, encoding="utf-8")
+
     logger.info(f"Матрица субпортфелей загружена: {len(df)} бумаг, {len(df.columns) - len(meta_cols)} субпортфелей")
     return df
 

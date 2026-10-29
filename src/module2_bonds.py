@@ -104,6 +104,7 @@ def save_csv(df: pd.DataFrame, path: Path, sep: str = ";", float_format: str = "
               float_format=float_format, date_format="%Y-%m-%d")
 
 
+
 def file_age(path: Path) -> float:
     return time.time() - path.stat().st_mtime if path.exists() else float('inf')
 
@@ -118,7 +119,7 @@ def load_portfolio_units(path: Path, logger: logging.Logger) -> pd.DataFrame:
     """Загружает матрицу субпортфелей. Если файла нет — возвращает пустой DataFrame."""
     if not path.exists():
         logger.info(f"Матрица {path.name} не найдена — будет создана")
-        return pd.DataFrame(columns=["SECID", "asset_type"])
+        return pd.DataFrame(columns=["SECID", "asset_type", "ISIN"])
     
     for sep in (";", ","):
         try:
@@ -132,11 +133,11 @@ def load_portfolio_units(path: Path, logger: logging.Logger) -> pd.DataFrame:
     
     if "SECID" not in df.columns:
         logger.warning(f"В {path.name} нет колонки SECID — создаю новую матрицу")
-        return pd.DataFrame(columns=["SECID", "asset_type"])
+        return pd.DataFrame(columns=["SECID", "asset_type", "ISIN"])
     
     # Приводим числовые колонки к numeric
     for c in df.columns:
-        if c not in ("SECID", "asset_type"):
+        if c not in ("SECID", "asset_type", "ISIN"):
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     
     return df
@@ -180,11 +181,11 @@ def update_subportfolio_column(
     
     # Заполняем NaN в остальных строках нулями
     for c in df.columns:
-        if c not in ("SECID", "asset_type"):
+        if c not in ("SECID", "asset_type", "ISIN"):
             df[c] = df[c].fillna(0)
     
     # Удаляем строки с total_units = 0
-    sub_cols = [c for c in df.columns if c not in ("SECID", "asset_type")]
+    sub_cols = [c for c in df.columns if c not in ("SECID", "asset_type", "ISIN")]
     if sub_cols:
         df["_total"] = df[sub_cols].sum(axis=1)
         removed = int((df["_total"] == 0).sum())
@@ -200,64 +201,178 @@ def update_subportfolio_column(
 def save_portfolio_units(df: pd.DataFrame, path: Path) -> None:
     """Сохраняет матрицу с разделителем ; и целыми числами для units."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    num_cols = [c for c in df.columns if c not in ("SECID", "asset_type")]
+    num_cols = [c for c in df.columns if c not in ("SECID", "asset_type", "ISIN")]
     out = df.copy()
     for c in num_cols:
         out[c] = out[c].round().astype("Int64")
     out.to_csv(path, index=False, sep=";", encoding="utf-8")
 
-def update_bond_portfolio_units(
-    core_ofz_ranking: pd.DataFrame,
-    long_ofz_ranking: pd.DataFrame,
-    corp_ranking: pd.DataFrame,
-    data_dir: Path,
-    logger: logging.Logger,
-) -> None:
-    """
-    Обновляет матрицу субпортфелей целевыми весами облигаций из трёх рейтингов.
-    """
-    units_path = data_dir / "portfolio_units.csv"
+# def update_bond_portfolio_units(
+#     core_ofz_ranking: pd.DataFrame,
+#     long_ofz_ranking: pd.DataFrame,
+#     corp_ranking: pd.DataFrame,
+#     data_dir: Path,
+#     logger: logging.Logger,
+# ) -> None:
+#     """
+#     Обновляет матрицу субпортфелей целевыми весами облигаций из трёх рейтингов.
+#     """
+#     units_path = data_dir / "portfolio_units.csv"
     
+#     try:
+#         matrix = load_portfolio_units(units_path, logger)
+        
+#         # Собираем словари {ISIN: target_weight_sleeve_pct} для каждого бакета
+#         def extract_weights(df: pd.DataFrame) -> dict:
+#             if df.empty:
+#                 return {}
+#             eligible = df[df.get("eligible") == True]
+#             if eligible.empty:
+#                 return {}
+#             weights = {}
+#             for _, row in eligible.iterrows():
+#                 isin = str(row.get("ISIN", "")).strip().upper()
+#                 weight = float(row.get("target_weight_sleeve_pct", 0) or 0)
+#                 if isin and weight > 0:
+#                     weights[isin] = weight
+#             return weights
+        
+#         core_ofz_weights = extract_weights(core_ofz_ranking)
+#         long_ofz_weights = extract_weights(long_ofz_ranking)
+#         corp_weights = extract_weights(corp_ranking)
+        
+#         # Обновляем три колонки
+#         matrix = update_subportfolio_column(matrix, CORE_OFZ_SUBPORTFOLIO_COL, core_ofz_weights, "bond", logger)
+#         matrix = update_subportfolio_column(matrix, LONG_OFZ_SUBPORTFOLIO_COL, long_ofz_weights, "bond", logger)
+#         matrix = update_subportfolio_column(matrix, CORP_SUBPORTFOLIO_COL, corp_weights, "bond", logger)
+        
+#         save_portfolio_units(matrix, units_path)
+        
+#         logger.info(
+#             f"Матрица обновлена: {len(matrix)} строк, "
+#             f"колонок-субпортфелей: {len([c for c in matrix.columns if c not in ('SECID','asset_type')])}, "
+#             f"заполнено: '{CORE_OFZ_SUBPORTFOLIO_COL}'={len(core_ofz_weights)}, "
+#             f"'{LONG_OFZ_SUBPORTFOLIO_COL}'={len(long_ofz_weights)}, "
+#             f"'{CORP_SUBPORTFOLIO_COL}'={len(corp_weights)}"
+#         )
+        
+#     except Exception as e:
+#         logger.error(f"Не удалось обновить матрицу субпортфелей: {e}")
+#         raise
+    
+def update_bond_portfolio_units(core_ofz_ranking: pd.DataFrame,
+                                long_ofz_ranking: pd.DataFrame,
+                                corp_ranking: pd.DataFrame,
+                                data_dir: Path,
+                                logger: logging.Logger) -> None:
+    """Обновляет матрицу субпортфелей целевыми весами облигаций.
+    Ключ строки — SECID (SU.../BYM...), отдельная колонка ISIN.
+    Поддерживает миграцию старых строк, где в SECID лежал ISIN."""
+    units_path = data_dir / "portfolio_units.csv"
     try:
         matrix = load_portfolio_units(units_path, logger)
-        
-        # Собираем словари {ISIN: target_weight_sleeve_pct} для каждого бакета
+        if matrix.empty:
+            matrix = pd.DataFrame(columns=["SECID", "asset_type"])
+        matrix = matrix.copy()
+        matrix["SECID"] = matrix["SECID"].astype(str).str.strip().str.upper()
+        # if "ISIN" not in matrix.columns:
+        #     matrix["ISIN"] = ""
+        # matrix["ISIN"] = matrix["ISIN"].fillna("").astype(str).str.strip().str.upper()
+
+        # 1. Маппинги из рейтингов (в них уже есть SECID + ISIN из справочников)
+        # isin_to_secid: dict = {}
+        # secid_to_isin: dict = {}
+        # for ranking in (core_ofz_ranking, long_ofz_ranking, corp_ranking):
+        #     if ranking.empty or "SECID" not in ranking.columns or "ISIN" not in ranking.columns:
+        #         continue
+        #     for _, r in ranking.iterrows():
+        #         secid = str(r.get("SECID", "")).strip().upper()
+                # isin = str(r.get("ISIN", "")).strip().upper()
+                # if secid and isin:
+                #     isin_to_secid[isin] = secid
+                #     secid_to_isin[secid] = isin
+        # logger.info(f"Матрица облигаций: маппинг SECID<->ISIN = {len(secid_to_isin)} бумаг")
+
+        # 2. Миграция legacy-строк: в SECID лежит ISIN
+        # migrated = 0
+        # for idx in matrix.index:
+        #     val = str(matrix.at[idx, "SECID"]).upper()
+        #     if len(val) >= 10 and (val.startswith("RU") or val.startswith("XS")):
+        #         real_secid = isin_to_secid.get(val, "")
+        #         if real_secid:
+        #             if not matrix.at[idx, "ISIN"]:
+        #                 matrix.at[idx, "ISIN"] = val
+        #             matrix.at[idx, "SECID"] = real_secid
+        #             migrated += 1
+        #         else:
+        #             logger.warning(f"Legacy ISIN {val}: SECID не найден в справочниках/рейтингах")
+        # if migrated:
+        #     logger.info(f"Матрица облигаций: мигрировано {migrated} строк")
+
+        # 3. Заполняем ISIN для всех известных облигаций
+        # known = matrix["SECID"].isin(secid_to_isin)
+        # matrix.loc[known, "ISIN"] = matrix.loc[known, "SECID"].map(secid_to_isin)
+
+        # 4. Веса по SECID (не по ISIN!)
         def extract_weights(df: pd.DataFrame) -> dict:
-            if df.empty:
+            if df.empty or "eligible" not in df.columns or "SECID" not in df.columns:
                 return {}
-            eligible = df[df.get("eligible") == True]
-            if eligible.empty:
-                return {}
+            eligible = df[df["eligible"] == True]  # noqa: E712
             weights = {}
-            for _, row in eligible.iterrows():
-                isin = str(row.get("ISIN", "")).strip().upper()
-                weight = float(row.get("target_weight_sleeve_pct", 0) or 0)
-                if isin and weight > 0:
-                    weights[isin] = weight
+            for _, r in eligible.iterrows():
+                secid = str(r.get("SECID", "")).strip().upper()
+                try:
+                    weight = float(r.get("target_weight_sleeve_pct", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if secid and weight > 0:
+                    weights[secid] = weight
             return weights
-        
-        core_ofz_weights = extract_weights(core_ofz_ranking)
-        long_ofz_weights = extract_weights(long_ofz_ranking)
-        corp_weights = extract_weights(corp_ranking)
-        
-        # Обновляем три колонки
-        matrix = update_subportfolio_column(matrix, CORE_OFZ_SUBPORTFOLIO_COL, core_ofz_weights, "bond", logger)
-        matrix = update_subportfolio_column(matrix, LONG_OFZ_SUBPORTFOLIO_COL, long_ofz_weights, "bond", logger)
-        matrix = update_subportfolio_column(matrix, CORP_SUBPORTFOLIO_COL, corp_weights, "bond", logger)
-        
+
+        def update_col(col_name: str, weights: dict) -> None:
+            """Обнуляем колонку, затем проставляем веса по SECID; новые строки — с ISIN."""
+            nonlocal matrix
+            if col_name not in matrix.columns:
+                matrix[col_name] = 0.0
+            matrix[col_name] = pd.to_numeric(matrix[col_name], errors="coerce").fillna(0.0)
+            matrix[col_name] = 0.0
+            for secid, weight in weights.items():
+                mask = matrix["SECID"] == secid
+                if mask.any():
+                    matrix.loc[mask, col_name] = weight
+                    # if secid in secid_to_isin:
+                    #     matrix.loc[mask, "ISIN"] = secid_to_isin[secid]
+                else:
+                    new_row = {c: 0 for c in matrix.columns}
+                    new_row["SECID"] = secid
+                    new_row["asset_type"] = "bond"
+                    # new_row["ISIN"] = secid_to_isin.get(secid, "")
+                    new_row[col_name] = weight
+                    matrix = pd.concat([matrix, pd.DataFrame([new_row])], ignore_index=True)
+            logger.info(f"Матрица: '{col_name}' заполнено {len(weights)} бумаг (ключ SECID)")
+
+        update_col(CORE_OFZ_SUBPORTFOLIO_COL, extract_weights(core_ofz_ranking))
+        update_col(LONG_OFZ_SUBPORTFOLIO_COL, extract_weights(long_ofz_ranking))
+        update_col(CORP_SUBPORTFOLIO_COL, extract_weights(corp_ranking))
+
+        # 5. Числовые колонки (ISIN — НЕ числовая!) и удаление пустых строк
+        meta_cols = {"SECID", "asset_type", "ISIN"}
+        sub_cols = [c for c in matrix.columns if c not in meta_cols]
+        for c in sub_cols:
+            matrix[c] = pd.to_numeric(matrix[c], errors="coerce").fillna(0.0)
+        if sub_cols:
+            keep = matrix[sub_cols].sum(axis=1) > 1e-9
+            dropped = int((~keep).sum())
+            if dropped:
+                logger.info(f"Матрица: удалено {dropped} строк с нулевыми весами")
+            matrix = matrix[keep].copy()
+        matrix = matrix.sort_values("SECID").reset_index(drop=True)
+
         save_portfolio_units(matrix, units_path)
-        
-        logger.info(
-            f"Матрица обновлена: {len(matrix)} строк, "
-            f"колонок-субпортфелей: {len([c for c in matrix.columns if c not in ('SECID','asset_type')])}, "
-            f"заполнено: '{CORE_OFZ_SUBPORTFOLIO_COL}'={len(core_ofz_weights)}, "
-            f"'{LONG_OFZ_SUBPORTFOLIO_COL}'={len(long_ofz_weights)}, "
-            f"'{CORP_SUBPORTFOLIO_COL}'={len(corp_weights)}"
-        )
-        
+        logger.info(f"Матрица сохранена: {len(matrix)} строк, колонка ISIN заполнена")
     except Exception as e:
-        logger.error(f"Не удалось обновить матрицу субпортфелей: {e}")
-        raise
+        logger.error(f"Ошибка обновления матрицы облигаций: {e}")    
+    
     
 # ============================================================================
 # Загрузка ставки ЦБ
@@ -451,26 +566,12 @@ def fetch_and_save_bonds_universe(data_dir: Path, logger: logging.Logger) -> Non
 # Загрузка цен облигаций
 # ============================================================================
 def fetch_and_save_bond_prices(data_dir: Path, logger: logging.Logger) -> None:
-    """
-    Загружает текущие цены облигаций с MOEX ISS.
-    Обновляет файл, если он отсутствует или устарел (> 1 часа).
-    
-    ВАЖНО: ACCRUEDINT (НКД) находится в блоке securities, а не marketdata.
-    """
     prices_path = data_dir / "bond_prices.csv"
-
-    # if is_fresh(prices_path, MAX_AGE_BOND_PRICES):
-    #     logger.info("Цены облигаций актуальны.")
-    #     return
-
     logger.info("Загрузка цен облигаций с MOEX ISS...")
-    logger.info(MOEX_BONDS_URL)
     params = {
         "iss.meta": "off",
         "iss.only": "marketdata,securities",
-        # marketdata: цены, доходности, дюрация, объёмы
         "marketdata.columns": "SECID,BOARDID,LCURRENTPRICE,LAST,LCLOSEPRICE,YIELD,DURATION,VOLTODAY",
-        # securities: ISIN, НКД (ACCRUEDINT), номинал и пр.
         "securities.columns": "SECID,BOARDID,ISIN,ACCRUEDINT,FACEVALUE",
     }
     try:
@@ -484,13 +585,11 @@ def fetch_and_save_bond_prices(data_dir: Path, logger: logging.Logger) -> None:
         logger.warning("Используются устаревшие локальные цены")
         return
 
-    # --- Блок marketdata ---
     if "marketdata" not in payload or "data" not in payload["marketdata"]:
         raise RuntimeError("Некорректный ответ MOEX ISS: нет блока marketdata.data")
     md_cols = payload["marketdata"]["columns"]
     md_df = pd.DataFrame(payload["marketdata"]["data"], columns=md_cols)
 
-    # --- Блок securities (отсюда берём ISIN и ACCRUEDINT) ---
     sec_block = payload.get("securities")
     if sec_block and "data" in sec_block and "columns" in sec_block:
         sec_df = pd.DataFrame(sec_block["data"], columns=sec_block["columns"])
@@ -498,43 +597,32 @@ def fetch_and_save_bond_prices(data_dir: Path, logger: logging.Logger) -> None:
         logger.warning("В ответе ISS нет блока securities — НКД и ISIN будут пустыми")
         sec_df = pd.DataFrame(columns=["SECID", "BOARDID", "ISIN", "ACCRUEDINT", "FACEVALUE"])
 
-    # --- Приведение типов marketdata ---
     for col in ["LCURRENTPRICE", "LAST", "LCLOSEPRICE", "YIELD", "DURATION", "VOLTODAY"]:
         if col in md_df.columns:
             md_df[col] = pd.to_numeric(md_df[col], errors="coerce")
 
-    # --- Приведение типов securities ---
     if "ACCRUEDINT" in sec_df.columns:
         sec_df["ACCRUEDINT"] = pd.to_numeric(sec_df["ACCRUEDINT"], errors="coerce").fillna(0.0)
     if "FACEVALUE" in sec_df.columns:
         sec_df["FACEVALUE"] = pd.to_numeric(sec_df["FACEVALUE"], errors="coerce")
 
-    # --- Выбор цены (приоритет: LCURRENTPRICE -> LAST -> LCLOSEPRICE) ---
     md_df["price_pct"] = np.nan
     for col in ["LCURRENTPRICE", "LAST", "LCLOSEPRICE"]:
         if col in md_df.columns:
             mask = md_df["price_pct"].isna() & md_df[col].notna() & (md_df[col] > 0)
             md_df.loc[mask, "price_pct"] = md_df.loc[mask, col]
 
-    # --- Дедупликация md_df по SECID (берём первую запись — основной режим торгов) ---
     md_df = md_df.dropna(subset=["SECID", "price_pct"])
     md_df = md_df.drop_duplicates(subset=["SECID"], keep="first")
-
-    # --- Дедупликация sec_df по SECID ---
     sec_df = sec_df.dropna(subset=["SECID"])
     sec_df = sec_df.drop_duplicates(subset=["SECID"], keep="first")
 
-    # --- Merge: marketdata + securities по SECID ---
-    merged = md_df.merge(
-        sec_df[["SECID", "ISIN", "ACCRUEDINT"]],
-        on="SECID",
-        how="left"
-    )
-
+    merged = md_df.merge(sec_df[["SECID", "ISIN", "ACCRUEDINT"]], on="SECID", how="left")
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     res_df = pd.DataFrame({
         "date": today_str,
+        "SECID": merged["SECID"],
         "ISIN": merged["ISIN"],
         "price_pct": merged["price_pct"],
         "nkd_rub": merged["ACCRUEDINT"].fillna(0.0),
@@ -543,82 +631,38 @@ def fetch_and_save_bond_prices(data_dir: Path, logger: logging.Logger) -> None:
         "volume_rub": merged["VOLTODAY"].fillna(0.0)
     })
 
-    # Исключаем внебиржевые сделки (SPOB)
-    if "BOARDID" in res_df.columns:
-        res_df = res_df[res_df["BOARDID"] != "SPOB"].copy()
-        logger.info(f"После исключения SPOB из цен: {len(res_df)} записей")
-    
-    # Очистка от записей без ISIN
+    if "BOARDID" in merged.columns:
+        res_df = res_df[merged["BOARDID"] != "SPOB"].copy()
     res_df = res_df.dropna(subset=["ISIN"])
     res_df = res_df.drop_duplicates(subset=["ISIN"], keep="first").sort_values("ISIN").reset_index(drop=True)
 
     save_csv(res_df, prices_path)
     logger.info(f"Цены облигаций обновлены: {len(res_df)} записей")
-
-# ============================================================================
-# Загрузка истории для расчёта среднего оборота
-# ============================================================================
-# def load_avg_volume(isin_list: list[str], days: int, logger: logging.Logger) -> tuple[dict[str, float], dict[str, float]]:
-#     """
-#     Загружает историю торгов и рассчитывает средний дневной оборот за N дней.
-#     Возвращает два словаря: {ISIN: avg_volume_rub} и {ISIN: avg_num_trades}.
-#     """
-#     if not isin_list:
-#         return {}, {}
     
-#     logger.info(f"Загрузка истории оборотов для {len(isin_list)} бумаг ({days} дней)...")
-#     volumes = {}
-#     num_trades = {}
     
-#     date_from = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    
-#     for i, isin in enumerate(isin_list, 1):
-#         if i % 50 == 0:
-#             logger.info(f"  Загружено {i}/{len(isin_list)}...")
-        
-#         try:
-#             params = {
-#                 "iss.meta": "off",
-#                 "iss.only": "history",
-#                 "history.columns": "SECID,TRADEDATE,VOLUME,VALUE,NUMTRADES",
-#                 "isin": isin,
-#                 "from": date_from
-#             }
-#             r = requests.get(MOEX_BONDS_HISTORY_URL, params=params, timeout=HTTP_TIMEOUT)
-#             r.raise_for_status()
-#             payload = r.json()
-            
-#             if "history" not in payload or "data" not in payload["history"]:
-#                 volumes[isin] = 0.0
-#                 num_trades[isin] = 0.0
-#                 continue
-            
-#             hist_cols = payload["history"]["columns"]
-#             hist_df = pd.DataFrame(payload["history"]["data"], columns=hist_cols)
-            
-#             if hist_df.empty:
-#                 volumes[isin] = 0.0
-#                 num_trades[isin] = 0.0
-#                 continue
-            
-#             # Приведение типов
-#             hist_df["VALUE"] = pd.to_numeric(hist_df["VALUE"], errors="coerce").fillna(0.0)
-#             hist_df["NUMTRADES"] = pd.to_numeric(hist_df["NUMTRADES"], errors="coerce").fillna(0.0)
-            
-#             # Средний оборот и среднее количество сделок
-#             avg_volume = hist_df["VALUE"].mean() if len(hist_df) > 0 else 0.0
-#             avg_trades = hist_df["NUMTRADES"].mean() if len(hist_df) > 0 else 0.0
-            
-#             volumes[isin] = avg_volume
-#             num_trades[isin] = avg_trades
-            
-#         except Exception as e:
-#             logger.debug(f"Ошибка загрузки истории для {isin}: {e}")
-#             volumes[isin] = 0.0
-#             num_trades[isin] = 0.0
-    
-#     logger.info(f"Загрузка истории завершена: {len(volumes)} бумаг")
-#     return volumes, num_trades
+def build_isin_to_secid_map(data_dir: Path, logger: logging.Logger) -> dict:
+    """
+    Строит маппинг ISIN -> SECID из справочников bonds_OFZ.csv и bonds_CORPS.csv.
+    Используется для обогащения цен и рейтингов облигаций колонкой SECID.
+    """
+    isin_to_secid = {}
+    for fn in ("bonds_OFZ.csv", "bonds_CORPS.csv"):
+        p = data_dir / fn
+        if not p.exists():
+            continue
+        try:
+            df = read_csv_flex(p)
+            if "ISIN" in df.columns and "SECID" in df.columns:
+                for isin, secid in zip(df["ISIN"], df["SECID"]):
+                    isin_s = str(isin).strip().upper()
+                    secid_s = str(secid).strip().upper()
+                    if isin_s and secid_s:
+                        isin_to_secid[isin_s] = secid_s
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить {fn} для маппинга ISIN->SECID: {e}")
+    logger.info(f"Маппинг ISIN->SECID построен: {len(isin_to_secid)} бумаг")
+    return isin_to_secid
+ 
 
 # ============================================================================
 # Вспомогательные функции для Module 2
@@ -728,101 +772,6 @@ def apply_water_filling(df_b: pd.DataFrame, share: float, cap: float, bond_sleev
     return df_b
 
 
-def update_bond_portfolio_units(
-    core_ofz_ranking: pd.DataFrame,
-    long_ofz_ranking: pd.DataFrame,
-    corp_ranking: pd.DataFrame,
-    data_dir: Path,
-    logger: logging.Logger,
-) -> None:
-    """
-    Обновляет матрицу субпортфелей целевыми весами облигаций из трёх рейтингов.
-    """
-    units_path = data_dir / "portfolio_units.csv"
-    
-    try:
-        # Загрузка существующей матрицы
-        if not units_path.exists():
-            matrix = pd.DataFrame(columns=["SECID", "asset_type"])
-        else:
-            for sep in (";", ","):
-                try:
-                    matrix = pd.read_csv(units_path, sep=sep)
-                    if len(matrix.columns) > 1:
-                        break
-                except Exception:
-                    continue
-            else:
-                matrix = pd.read_csv(units_path, sep=";")
-            
-            for c in matrix.columns:
-                if c not in ("SECID", "asset_type"):
-                    matrix[c] = pd.to_numeric(matrix[c], errors="coerce").fillna(0)
-
-        def extract_weights(df: pd.DataFrame) -> dict:
-            if df.empty:
-                return {}
-            eligible = df[df.get("eligible") == True]
-            if eligible.empty:
-                return {}
-            weights = {}
-            for _, row in eligible.iterrows():
-                isin = str(row.get("ISIN", "")).strip().upper()
-                weight = float(row.get("target_weight_sleeve_pct", 0) or 0)
-                if isin and weight > 0:
-                    weights[isin] = weight
-            return weights
-        
-        core_ofz_weights = extract_weights(core_ofz_ranking)
-        long_ofz_weights = extract_weights(long_ofz_ranking)
-        corp_weights = extract_weights(corp_ranking)
-        
-        # Функция обновления колонки (копия из module1 для автономности)
-        def update_col(mat: pd.DataFrame, col_name: str, values: dict, asset_type: str) -> pd.DataFrame:
-            df = mat.copy()
-            if col_name not in df.columns:
-                df[col_name] = 0
-            df[col_name] = 0
-            for secid, units in values.items():
-                secid_s = str(secid).strip().upper()
-                mask = df["SECID"].astype(str).str.upper() == secid_s
-                if mask.any():
-                    df.loc[mask, col_name] = units
-                else:
-                    new_row = pd.DataFrame([{"SECID": secid_s, "asset_type": asset_type, col_name: units}])
-                    df = pd.concat([df, new_row], ignore_index=True)
-            for c in df.columns:
-                if c not in ("SECID", "asset_type"):
-                    df[c] = df[c].fillna(0)
-            sub_cols = [c for c in df.columns if c not in ("SECID", "asset_type")]
-            if sub_cols:
-                df["_total"] = df[sub_cols].sum(axis=1)
-                df = df[df["_total"] > 0].drop(columns=["_total"]).reset_index(drop=True)
-            return df.sort_values(["asset_type", "SECID"], ascending=[False, True]).reset_index(drop=True)
-
-        matrix = update_col(matrix, "ОФЗ", core_ofz_weights, "bond")
-        matrix = update_col(matrix, "Длинные ОФЗ", long_ofz_weights, "bond")
-        matrix = update_col(matrix, "Корпораты", corp_weights, "bond")
-        
-        # Сохранение
-        units_path.parent.mkdir(parents=True, exist_ok=True)
-        out = matrix.copy()
-        for c in out.columns:
-            if c not in ("SECID", "asset_type"):
-                out[c] = out[c].round().astype("Int64")
-        out.to_csv(units_path, index=False, sep=";", encoding="utf-8")
-        
-        logger.info(
-            f"Матрица обновлена: {len(matrix)} строк, "
-            f"заполнено: 'ОФЗ'={len(core_ofz_weights)}, "
-            f"'Длинные ОФЗ'={len(long_ofz_weights)}, "
-            f"'Корпораты'={len(corp_weights)}"
-        )
-    except Exception as e:
-        logger.error(f"Не удалось обновить матрицу субпортфелей: {e}")
-        raise
-
-
 # ============================================================================
 # Основная функция рейтинга
 # ============================================================================
@@ -837,7 +786,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
     corps = pd.read_csv(data_dir / "bonds_CORPS.csv", sep=";")
     prices = pd.read_csv(data_dir / "bond_prices.csv", sep=";")
     prices["date"] = pd.to_datetime(prices["date"])
-    latest_prices = prices[prices["date"] <= date_dt].sort_values("date").groupby("ISIN").tail(1).set_index("ISIN")
+    latest_prices = prices[prices["date"] <= date_dt].sort_values("date").groupby("SECID").tail(1).set_index("SECID")
     
     # Рейтинг-порядок
     rating_order = {"AAA": 1, "AA+": 2, "AA": 3, "AA-": 4, "A+": 5, "A": 6, "A-": 7, "BBB+": 8, "BBB": 9, "BBB-": 10}
@@ -851,7 +800,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
         isin = row["ISIN"]
         mat_date = pd.to_datetime(row.get("maturity_date"), errors="coerce")
         if pd.isna(mat_date):
-            ofz_results.append({"date": date, "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
+            ofz_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
                 "bond_type": "ofz", "maturity_date": "", "days_to_maturity": 0, "coupon_rate_pct": 0.0,
                 "price_pct": np.nan, "nkd_rub": np.nan, "current_yield_pct": 0.0, "ytm_gross_pct": np.nan,
                 "spread_to_cbr_pct": np.nan, "duration_years": np.nan, "bucket": "excluded", "eligible": False,
@@ -862,7 +811,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
         years_to_mat = (mat_date - date_dt).days / 365.0
         
         if isin not in latest_prices.index:
-            ofz_results.append({"date": date, "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
+            ofz_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
                 "bond_type": "ofz", "maturity_date": mat_date.strftime("%Y-%m-%d"), "days_to_maturity": int(years_to_mat * 365),
                 "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": np.nan, "nkd_rub": np.nan,
                 "current_yield_pct": 0.0, "ytm_gross_pct": np.nan, "spread_to_cbr_pct": np.nan, "duration_years": np.nan,
@@ -906,7 +855,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
                 
         current_yield = (row.get("coupon_rate_pct", 0.0) / (price / 100)) if price > 0 else 0.0
         
-        ofz_results.append({"date": date, "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
+        ofz_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
             "bond_type": "ofz", "maturity_date": mat_date.strftime("%Y-%m-%d"), "days_to_maturity": int(years_to_mat * 365),
             "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": price, "nkd_rub": p_row.get("nkd_rub", 0.0),
             "current_yield_pct": current_yield, "ytm_gross_pct": ytm, "spread_to_cbr_pct": ytm - risk_free_rate if pd.notna(ytm) else np.nan,
@@ -940,7 +889,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
         isin = row["ISIN"]
         mat_date = pd.to_datetime(row.get("maturity_date"), errors="coerce")
         if pd.isna(mat_date):
-            corp_results.append({"date": date, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
+            corp_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
                 "bond_type": "corp", "maturity_date": "", "days_to_maturity": 0, "coupon_rate_pct": 0.0,
                 "price_pct": np.nan, "nkd_rub": np.nan, "current_yield_pct": 0.0, "ytm_gross_pct": np.nan,
                 "spread_to_cbr_pct": np.nan, "duration_years": np.nan, "bucket": "excluded", "eligible": False,
@@ -951,7 +900,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
         months_to_mat = (mat_date - date_dt).days / 30.44
         
         if isin not in latest_prices.index:
-            corp_results.append({"date": date, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
+            corp_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
                 "bond_type": "corp", "maturity_date": mat_date.strftime("%Y-%m-%d"), "days_to_maturity": int(months_to_mat * 30.44),
                 "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": np.nan, "nkd_rub": np.nan,
                 "current_yield_pct": 0.0, "ytm_gross_pct": np.nan, "spread_to_cbr_pct": np.nan, "duration_years": np.nan,
@@ -994,7 +943,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
                 
         current_yield = (row.get("coupon_rate_pct", 0.0) / (price / 100)) if price > 0 else 0.0
         
-        corp_results.append({"date": date, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
+        corp_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
             "bond_type": "corp", "maturity_date": mat_date.strftime("%Y-%m-%d"), "days_to_maturity": int(months_to_mat * 30.44),
             "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": price, "nkd_rub": p_row.get("nkd_rub", 0.0),
             "current_yield_pct": current_yield, "ytm_gross_pct": ytm, "spread_to_cbr_pct": ytm - risk_free_rate if pd.notna(ytm) else np.nan,
@@ -1122,6 +1071,21 @@ def _count_reasons(df: pd.DataFrame, reason_col: str = "exclusion_reason") -> di
         return {}
     return excluded[reason_col].value_counts().to_dict()
 
+# def enrich_with_secid(df: pd.DataFrame, isin_map: dict) -> pd.DataFrame:
+#     if df.empty or "ISIN" not in df.columns:
+#         return df
+#     out = df.copy()
+#     out["ISIN"] = out["ISIN"].astype(str).str.strip().str.upper()
+#     out["SECID"] = out["ISIN"].map(isin_map).fillna("")
+#     # Вставляем SECID сразу после ISIN
+#     cols = list(out.columns)
+#     if "SECID" in cols:
+#         isin_idx = cols.index("ISIN")
+#         cols.remove("SECID")
+#         cols.insert(isin_idx + 1, "SECID")
+#         out = out[cols]
+#     return out
+        
 # ============================================================================
 # Основная функция рейтинга
 # ============================================================================
@@ -1166,6 +1130,7 @@ def main(argv: list[str] | None = None) -> int:
         # Рейтинг (теперь возвращает 5 значений)
         core_ofz_ranking, long_ofz_ranking, corp_ranking, bond_allocation, filter_stats,df_ofz_all,df_corp_all = rank_bonds(date, config, data_dir, logger, diagnostics)
         
+        
         # Сохранение
         save_csv(core_ofz_ranking, output_dir / "core_ofz_ranking.csv")
         save_csv(long_ofz_ranking, output_dir / "long_ofz_ranking.csv")
@@ -1175,14 +1140,14 @@ def main(argv: list[str] | None = None) -> int:
         save_csv(df_ofz_all, output_dir / "ofz_all_with_reasons.csv")
         save_csv(df_corp_all, output_dir / "corp_all_with_reasons.csv")
         # Обновление матрицы субпортфелей
-        try:
-            update_bond_portfolio_units(
-                core_ofz_ranking, long_ofz_ranking, corp_ranking,
-                data_dir, logger
-            )
-        except Exception as e:
-            logger.error(f"Ошибка обновления матрицы: {e}")
-            diagnostics.append({"code": "portfolio_units_update_failed", "details": str(e)})
+        # try:
+        #     update_bond_portfolio_units(
+        #         core_ofz_ranking, long_ofz_ranking, corp_ranking,
+        #         data_dir, logger
+        #     )
+        # except Exception as e:
+        #     logger.error(f"Ошибка обновления матрицы: {e}")
+        #     diagnostics.append({"code": "portfolio_units_update_failed", "details": str(e)})
                 
         logger.info(f"core_ofz_ranking: {len(core_ofz_ranking)} строк")
         logger.info(f"long_ofz_ranking: {len(long_ofz_ranking)} строк")

@@ -90,6 +90,29 @@ def load_stoplist(path: Path, date_dt: pd.Timestamp, logger: logging.Logger) -> 
     logger.info(f"Стоп-лист: {len(result)} активных бумаг (из {len(df)} записей)")
     return result
 
+# def build_secid_to_isin_map(data_dir: Path, logger: logging.Logger) -> dict:
+#     """
+#     Строит маппинг SECID -> ISIN из справочника stocks_universe.csv.
+#     Используется для обогащения цен и рейтинга акций колонкой ISIN.
+#     """
+#     secid_to_isin = {}
+#     p = data_dir / "stocks_universe.csv"
+#     if not p.exists():
+#         logger.warning("stocks_universe.csv не найден — маппинг SECID->ISIN пуст")
+#         return secid_to_isin
+#     try:
+#         df = pd.read_csv(p, sep=";")
+#         if "SECID" in df.columns and "ISIN" in df.columns:
+#             for secid, isin in zip(df["SECID"], df["ISIN"]):
+#                 secid_s = str(secid).strip().upper()
+#                 isin_s = str(isin).strip().upper()
+#                 if secid_s and isin_s:
+#                     secid_to_isin[secid_s] = isin_s
+#     except Exception as e:
+#         logger.warning(f"Не удалось загрузить stocks_universe.csv для маппинга SECID->ISIN: {e}")
+#     logger.info(f"Маппинг SECID->ISIN построен: {len(secid_to_isin)} бумаг")
+#     return secid_to_isin
+
 # ============================================================================
 # Матрица субпортфелей
 # ============================================================================
@@ -177,7 +200,7 @@ def load_portfolio_units(path: Path, logger: logging.Logger) -> pd.DataFrame:
     # Приводим числовые колонки (все кроме SECID/asset_type) к numeric,
     # пустые значения -> 0
     for c in df.columns:
-        if c not in ("SECID", "asset_type"):
+        if c not in ("SECID", "asset_type", "ISIN"):
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     return df
 
@@ -219,11 +242,11 @@ def update_subportfolio_column(
 
     # Заполняем NaN в остальных строках нулями (для новых колонок)
     for c in df.columns:
-        if c not in ("SECID", "asset_type"):
+        if c not in ("SECID", "asset_type", "ISIN"):
             df[c] = df[c].fillna(0)
 
     # Удаляем строки с total_units_row = 0
-    sub_cols = [c for c in df.columns if c not in ("SECID", "asset_type")]
+    sub_cols = [c for c in df.columns if c not in ("SECID", "asset_type", "ISIN")]
     if sub_cols:
         df["_total"] = df[sub_cols].sum(axis=1)
         removed = int((df["_total"] == 0).sum())
@@ -239,7 +262,7 @@ def update_subportfolio_column(
 def save_portfolio_units(df: pd.DataFrame, path: Path) -> None:
     """Сохраняет матрицу с разделителем ; и целыми числами для units."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    num_cols = [c for c in df.columns if c not in ("SECID", "asset_type")]
+    num_cols = [c for c in df.columns if c not in ("SECID", "asset_type", "ISIN")]
     out = df.copy()
     for c in num_cols:
         out[c] = out[c].round().astype("Int64")
@@ -355,24 +378,34 @@ def fetch_moex_prices() -> pd.DataFrame:
     payload = r.json()
     if "marketdata" not in payload or "data" not in payload["marketdata"]:
         raise ValueError("В ответе ISS нет блока marketdata")
-
     md = pd.DataFrame(payload["marketdata"]["data"],
                       columns=payload["marketdata"]["columns"])
     for col in ["LCURRENTPRICE", "LAST", "LCLOSEPRICE"]:
         if col in md.columns:
             md[col] = pd.to_numeric(md[col], errors="coerce")
-
     md["close"] = np.nan
     for col in ["LCURRENTPRICE", "LAST", "LCLOSEPRICE"]:
         if col in md.columns:
             mask = md["close"].isna() & md[col].notna() & (md[col] > 0)
             md.loc[mask, "close"] = md.loc[mask, col]
-
     md = md[["SECID", "close"]].dropna(subset=["close"])
+    # Извлекаем блок securities и merge с md для добавления ISIN
+    sec_df = pd.DataFrame()
+    if "securities" in payload and "data" in payload["securities"]:
+        sec_df = pd.DataFrame(payload["securities"]["data"],
+                              columns=payload["securities"]["columns"])
+        sec_df = sec_df[["SECID", "ISIN"]].dropna(subset=["SECID"])
+        # Дедупликация по SECID (берём первую запись)
+        sec_df = sec_df.drop_duplicates(subset=["SECID"], keep="first")
+    # Merge: добавляем ISIN к ценам
+    if not sec_df.empty:
+        md = md.merge(sec_df, on="SECID", how="left")
+    else:
+        md["ISIN"] = ""
     md["date"] = datetime.now().strftime("%Y-%m-%d")
     md["volume_rub"] = 0.0
-    return md[["date", "SECID", "close", "volume_rub"]]
-
+    prices_df = md[["date", "SECID", "ISIN", "close", "volume_rub"]]
+    return prices_df
 
 def fetch_cbr_rate() -> pd.DataFrame:
     today = datetime.now()
@@ -769,6 +802,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
 
         results.append({
             'date': date, 'SECID': secid,
+            'ISIN': uni_row.get('ISIN', ''),
             'name': uni_row.get('name', ''),
             'issuer': uni_row.get('issuer', ''),
             'sector': uni_row.get('sector', 'Unknown'),
@@ -946,7 +980,7 @@ def main(argv: list[str] | None = None) -> int:
         check_required_files(data_dir, logger)
 
         stock_ranking, stock_excluded = rank_stocks(date, config, data_dir, logger, diagnostics)
-
+        
         save_csv(stock_ranking, output_dir / "stock_ranking.csv")
         save_csv(stock_excluded, output_dir / "stock_excluded.csv")
 

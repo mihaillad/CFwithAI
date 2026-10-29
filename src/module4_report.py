@@ -77,7 +77,7 @@ BOND_COLUMNS = [
 
 # Колонки портфеля (добавлены action и reason)
 PORTFOLIO_COLUMNS = [
-    ("SECID_or_ISIN", "Тикер / ISIN", "ticker"),
+    ("SECID", "Тикер / ISIN", "ticker"),
     ("name", "Название", "txt"),
     ("quantity", "Кол-во", "num"),
     ("current_value", "∑ тек., ₽", "money"),
@@ -227,8 +227,8 @@ def compute_subportfolio_summary(matrix: pd.DataFrame, portfolio_details: pd.Dat
 
     # Подготовка portfolio_details
     details = portfolio_details.copy()
-    if not details.empty and "SECID_or_ISIN" in details.columns:
-        details["SECID"] = details["SECID_or_ISIN"].astype(str).str.strip().str.upper()
+    if not details.empty and "SECID" in details.columns:
+        details["SECID"] = details["SECID"].astype(str).str.strip().str.upper()
     else:
         details = pd.DataFrame(columns=["SECID", "current_value"])
 
@@ -512,7 +512,7 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, name_map: dict,
 
     # Добавляем колонку name из маппинга
     df = df.copy()
-    df["name"] = df["SECID_or_ISIN"].astype(str).str.strip().str.upper().map(name_map).fillna("")
+    df["name"] = df["SECID"].astype(str).str.strip().str.upper().map(name_map).fillna("")
 
     cols = [(c, h, k) for c, h, k in PORTFOLIO_COLUMNS if c in df.columns]
     head = "".join(
@@ -522,7 +522,7 @@ def render_portfolio(df: pd.DataFrame, isin_map: dict, name_map: dict,
     )
     rows_html = []
     for _, row in df.iterrows():
-        secid = row["SECID_or_ISIN"]
+        secid = row["SECID"]
         asset_type = str(row.get("asset_type", ""))
         isin = isin_map.get(str(secid).upper(), "") if asset_type == "stock" else secid
 
@@ -847,15 +847,15 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(f"=== Module 4 start: date={date} ===")
     try:
         out = build_report(date, input_dir, output_dir, raw_dir, logger)
-        if args.open:
-            if sys.platform == "win32":
-                import os
-                try:
-                    os.startfile(str(out))
-                except Exception:
-                    webbrowser.open(out.as_uri())
-            else:
-                webbrowser.open(out.as_uri())
+        # if args.open:
+            # if sys.platform == "win32":
+                # import os
+                # try:
+                    # os.startfile(str(out))
+                # except Exception:
+                    # webbrowser.open(out.as_uri())
+            # else:
+                # webbrowser.open(out.as_uri())
         logger.info("=== Module 4 finished ===")
         return 0
     except Exception as e:

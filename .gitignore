@@ -4,6 +4,7 @@
 /data/raw/deals.csv
 *.log
 .vscode
+/TZ/
 
 
 # Byte-compiled / optimized / DLL files

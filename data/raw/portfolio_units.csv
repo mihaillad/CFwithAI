@@ -1,18 +1,19 @@
 SECID;asset_type;Дивиденды;ОФЗ;Корпораты;Длинные ОФЗ;ВТБ;Акции роста;Вечный портфель;2026
 AQUA;stock;0;0;0;0;0;1;0;0
 BSPB;stock;0;0;0;0;0;0;1;0
+<<<<<<< HEAD
 CARM;stock;6;0;0;0;0;0;0;0
+=======
+>>>>>>> 690e52973053dbc00b5c8c34e6726a910fc954c1
 CHMF;stock;0;0;0;0;0;3;1;0
-FIXR;stock;4;0;0;0;0;0;0;0
 FLOT;stock;0;0;0;0;0;1;0;1
 GAZP;stock;0;0;0;0;0;0;1;0
 GMKN;stock;0;0;0;0;0;0;0;1
 HEAD;stock;0;0;0;0;0;0;0;1
 HNFG;stock;0;0;0;0;0;1;0;1
 IRAO;stock;0;0;0;0;0;0;1;1
-KAZT;stock;8;0;0;0;0;0;0;0
-LEAS;stock;6;0;0;0;0;0;0;0
 LENT;stock;0;0;0;0;0;0;0;1
+<<<<<<< HEAD
 LKOH;stock;8;0;0;0;0;0;1;1
 MDMG;stock;0;0;0;0;0;1;0;1
 MOEX;stock;0;0;0;0;0;0;1;0
@@ -21,13 +22,21 @@ MTSS;stock;0;0;0;0;0;0;0;1
 NLMK;stock;0;0;0;0;0;1;0;0
 NVTK;stock;0;0;0;0;0;0;1;1
 OGKB;stock;7;0;0;0;0;0;0;0
+=======
+LKOH;stock;0;0;0;0;0;0;1;1
+MDMG;stock;0;0;0;0;0;1;0;1
+MOEX;stock;0;0;0;0;0;0;1;0
+MTSS;stock;0;0;0;0;0;0;0;1
+NLMK;stock;0;0;0;0;0;1;0;0
+NVTK;stock;0;0;0;0;0;0;1;1
+>>>>>>> 690e52973053dbc00b5c8c34e6726a910fc954c1
 OZON;stock;0;0;0;0;0;0;0;1
 PHOR;stock;0;0;0;0;0;0;0;1
-PMSB;stock;3;0;0;0;0;0;0;0
 POSI;stock;0;0;0;0;0;0;0;1
-RENI;stock;4;0;0;0;0;0;0;1
+RENI;stock;0;0;0;0;0;0;0;1
 ROSN;stock;0;0;0;0;0;0;1;0
 RTKMP;stock;0;0;0;0;0;0;1;1
+<<<<<<< HEAD
 RU000A0JXE06;bond;0;0;3;0;0;0;0;0
 RU000A0JXN21;bond;0;0;3;0;0;0;0;0
 RU000A0JXPG2;bond;0;0;3;0;0;0;0;0
@@ -40,7 +49,13 @@ TATNP;stock;0;0;0;0;0;0;1;0
 TRNFP;stock;0;0;0;0;0;0;1;1
 VLHZ;stock;4;0;0;0;0;0;0;0
 VSEH;stock;9;0;0;0;0;0;0;0
+=======
+SBER;stock;0;0;0;0;0;1;1;1
+SBERP;stock;0;0;0;0;0;1;1;1
+T;stock;0;0;0;0;0;0;0;1
+TATNP;stock;0;0;0;0;0;0;1;0
+TRNFP;stock;0;0;0;0;0;0;1;1
+>>>>>>> 690e52973053dbc00b5c8c34e6726a910fc954c1
 VTBR;stock;0;0;0;0;1;0;0;0
-X5;stock;6;0;0;0;0;0;1;1
+X5;stock;0;0;0;0;0;0;1;1
 YDEX;stock;0;0;0;0;0;1;0;1
-ZAYM;stock;8;0;0;0;0;0;0;0

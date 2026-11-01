@@ -1,10 +1,7 @@
 SECID;asset_type;Дивиденды;ОФЗ;Корпораты;Длинные ОФЗ;ВТБ;Акции роста;Вечный портфель;2026
 AQUA;stock;0;0;0;0;0;1;0;0
 BSPB;stock;0;0;0;0;0;0;1;0
-<<<<<<< HEAD
 CARM;stock;6;0;0;0;0;0;0;0
-=======
->>>>>>> 690e52973053dbc00b5c8c34e6726a910fc954c1
 CHMF;stock;0;0;0;0;0;3;1;0
 FLOT;stock;0;0;0;0;0;1;0;1
 GAZP;stock;0;0;0;0;0;0;1;0
@@ -13,49 +10,31 @@ HEAD;stock;0;0;0;0;0;0;0;1
 HNFG;stock;0;0;0;0;0;1;0;1
 IRAO;stock;0;0;0;0;0;0;1;1
 LENT;stock;0;0;0;0;0;0;0;1
-<<<<<<< HEAD
-LKOH;stock;8;0;0;0;0;0;1;1
-MDMG;stock;0;0;0;0;0;1;0;1
-MOEX;stock;0;0;0;0;0;0;1;0
+LKOH;stock;8;0;0;0;0;0;2;2
+MDMG;stock;0;0;0;0;0;2;0;2
+MOEX;stock;0;0;0;0;0;0;2;0
 MRSB;stock;10;0;0;0;0;0;0;0
-MTSS;stock;0;0;0;0;0;0;0;1
-NLMK;stock;0;0;0;0;0;1;0;0
-NVTK;stock;0;0;0;0;0;0;1;1
+MTSS;stock;0;0;0;0;0;0;0;2
+NLMK;stock;0;0;0;0;0;2;0;0
+NVTK;stock;0;0;0;0;0;0;2;2
 OGKB;stock;7;0;0;0;0;0;0;0
-=======
-LKOH;stock;0;0;0;0;0;0;1;1
-MDMG;stock;0;0;0;0;0;1;0;1
-MOEX;stock;0;0;0;0;0;0;1;0
-MTSS;stock;0;0;0;0;0;0;0;1
-NLMK;stock;0;0;0;0;0;1;0;0
-NVTK;stock;0;0;0;0;0;0;1;1
->>>>>>> 690e52973053dbc00b5c8c34e6726a910fc954c1
 OZON;stock;0;0;0;0;0;0;0;1
 PHOR;stock;0;0;0;0;0;0;0;1
 POSI;stock;0;0;0;0;0;0;0;1
 RENI;stock;0;0;0;0;0;0;0;1
 ROSN;stock;0;0;0;0;0;0;1;0
 RTKMP;stock;0;0;0;0;0;0;1;1
-<<<<<<< HEAD
 RU000A0JXE06;bond;0;0;3;0;0;0;0;0
 RU000A0JXN21;bond;0;0;3;0;0;0;0;0
-RU000A0JXPG2;bond;0;0;3;0;0;0;0;0
 RZSB;stock;2;0;0;0;0;0;0;0
 SAGOP;stock;10;0;0;0;0;0;0;0
-SBER;stock;0;0;0;0;0;1;1;1
-SBERP;stock;0;0;0;0;0;1;1;1
-T;stock;5;0;0;0;0;0;0;1
-TATNP;stock;0;0;0;0;0;0;1;0
-TRNFP;stock;0;0;0;0;0;0;1;1
+SBER;stock;0;0;0;0;0;2;2;2
+SBERP;stock;0;0;0;0;0;2;2;2
+T;stock;5;0;0;0;0;0;0;2
+TATNP;stock;0;0;0;0;0;0;2;0
+TRNFP;stock;0;0;0;0;0;0;2;2
 VLHZ;stock;4;0;0;0;0;0;0;0
 VSEH;stock;9;0;0;0;0;0;0;0
-=======
-SBER;stock;0;0;0;0;0;1;1;1
-SBERP;stock;0;0;0;0;0;1;1;1
-T;stock;0;0;0;0;0;0;0;1
-TATNP;stock;0;0;0;0;0;0;1;0
-TRNFP;stock;0;0;0;0;0;0;1;1
->>>>>>> 690e52973053dbc00b5c8c34e6726a910fc954c1
 VTBR;stock;0;0;0;0;1;0;0;0
 X5;stock;0;0;0;0;0;0;1;1
 YDEX;stock;0;0;0;0;0;1;0;1

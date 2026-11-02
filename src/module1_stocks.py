@@ -9,7 +9,7 @@
     python src/module1_stocks.py
 
 При запуске как __main__ автоматически:
-  - создаёт data/raw/ и data/output/
+  - создаёт data/raw/,data/upd/ и data/output/
   - загружает календарь БКС -> divs_data.csv
   - загружает справочник акций с MOEX ISS -> stocks_universe.csv
   - загружает цены MOEX ISS -> stock_prices.csv
@@ -48,6 +48,7 @@ HTTP_TIMEOUT = 30
 # Пути и константы по умолчанию
 # ============================================================================
 DEFAULT_DATA_DIR = Path("data/raw")
+DEFAULT_UPD_DIR = Path("data/upd")
 DEFAULT_OUTPUT_DIR = Path("data/output")
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 
@@ -58,7 +59,6 @@ CRITICAL_RAW_FILES = [
 
 # Опциональные файлы (могут быть получены из внешних источников)
 OPTIONAL_RAW_FILES = [
-    "divs_data.csv",
     "stock_prices.csv",
     "risk_free_rate.csv",
     "special_dividends_registry.csv",
@@ -68,7 +68,7 @@ OPTIONAL_RAW_FILES = [
 # ============================================================================
 # Стоп-лист
 # ============================================================================
-STOP_LIST_PATH = DEFAULT_DATA_DIR / "stoplist.csv"
+STOP_LIST_PATH = DEFAULT_UPD_DIR / "stoplist.csv"
 
 
 def load_stoplist(path: Path, date_dt: pd.Timestamp, logger: logging.Logger) -> set:
@@ -90,33 +90,10 @@ def load_stoplist(path: Path, date_dt: pd.Timestamp, logger: logging.Logger) -> 
     logger.info(f"Стоп-лист: {len(result)} активных бумаг (из {len(df)} записей)")
     return result
 
-# def build_secid_to_isin_map(data_dir: Path, logger: logging.Logger) -> dict:
-#     """
-#     Строит маппинг SECID -> ISIN из справочника stocks_universe.csv.
-#     Используется для обогащения цен и рейтинга акций колонкой ISIN.
-#     """
-#     secid_to_isin = {}
-#     p = data_dir / "stocks_universe.csv"
-#     if not p.exists():
-#         logger.warning("stocks_universe.csv не найден — маппинг SECID->ISIN пуст")
-#         return secid_to_isin
-#     try:
-#         df = pd.read_csv(p, sep=";")
-#         if "SECID" in df.columns and "ISIN" in df.columns:
-#             for secid, isin in zip(df["SECID"], df["ISIN"]):
-#                 secid_s = str(secid).strip().upper()
-#                 isin_s = str(isin).strip().upper()
-#                 if secid_s and isin_s:
-#                     secid_to_isin[secid_s] = isin_s
-#     except Exception as e:
-#         logger.warning(f"Не удалось загрузить stocks_universe.csv для маппинга SECID->ISIN: {e}")
-#     logger.info(f"Маппинг SECID->ISIN построен: {len(secid_to_isin)} бумаг")
-#     return secid_to_isin
-
 # ============================================================================
 # Матрица субпортфелей
 # ============================================================================
-PORTFOLIO_UNITS_PATH = DEFAULT_DATA_DIR / "portfolio_units.csv"
+PORTFOLIO_UNITS_PATH = DEFAULT_UPD_DIR / "portfolio_units.csv"
 DIV_SUBPORTFOLIO_COL = "Дивиденды"  # Имя авто-колонки, которую заполняет Module1
 
 
@@ -590,12 +567,12 @@ def generate_forecast_dividends(divs_df: pd.DataFrame, today: pd.Timestamp,
 # Основная функция модуля
 # ============================================================================
 
-def rank_stocks(date: str, config: dict, data_dir: Path,
+def rank_stocks(date: str, config: dict, data_dir: Path, upd_dir: Path,
                 logger: logging.Logger, diagnostics: list):
     date_dt = pd.to_datetime(date)
 
     # Загрузка стоп-листа (применяется ко всему рейтингу)
-    stoplist = load_stoplist(data_dir / "stoplist.csv", date_dt, logger)
+    stoplist = load_stoplist(upd_dir / "stoplist.csv", date_dt, logger)
     if stoplist:
         logger.info(f"Стоп-лист активен: {len(stoplist)} бумаг")
 
@@ -614,7 +591,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
         bcs_df = pd.DataFrame(columns=['SECID', 'close_date', 'div_sum'])
         diagnostics.append({'code': 'bcs_fetch_failed', 'details': str(e)})
 
-    divs_path = data_dir / 'divs_data.csv'
+    divs_path = upd_dir / 'divs_data.csv'
     divs_df = update_divs_data(divs_path, bcs_df, date_dt)
     logger.info(f"divs_data.csv updated: {len(divs_df)} records, "
                 f"{divs_df['SECID'].nunique()} tickers")
@@ -896,7 +873,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path,
     # ------------------------------------------------------------------
     # Шаг 5. Обновление матрицы субпортфелей (колонка "Дивиденды")
     # ------------------------------------------------------------------
-    units_path = data_dir / "portfolio_units.csv"
+    units_path = upd_dir / "portfolio_units.csv"
     try:
         matrix = load_portfolio_units(units_path, logger)
 
@@ -943,6 +920,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Путь к config.yaml")
     ap.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR),
                     help="Папка с входными CSV (data/raw)")
+    ap.add_argument("--upd-dir", default=str(DEFAULT_UPD_DIR),
+                    help="Папка с входными CSV (data/raw)")
     ap.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR),
                     help="Папка для выходных CSV (data/output)")
     ap.add_argument("--update-universe", action="store_true",
@@ -954,10 +933,13 @@ def main(argv: list[str] | None = None) -> int:
                    else project_root / args.config)
     data_dir = (Path(args.data_dir) if Path(args.data_dir).is_absolute()
                 else project_root / args.data_dir)
+    upd_dir = (Path(args.upd_dir) if Path(args.upd_dir).is_absolute()
+                else project_root / args.upd_dir)
     output_dir = (Path(args.output_dir) if Path(args.output_dir).is_absolute()
                   else project_root / args.output_dir)
 
     data_dir.mkdir(parents=True, exist_ok=True)
+    upd_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     config = load_config(config_path)
@@ -968,7 +950,7 @@ def main(argv: list[str] | None = None) -> int:
         date = args.date or str(date_from_config)
 
     logger = setup_logging(date, output_dir)
-    logger.info(f"=== Module 1 start: date={date}, data_dir={data_dir}, output_dir={output_dir} ===")
+    logger.info(f"=== Module 1 start: date={date}, data_dir={data_dir}, upd_dir={upd_dir}, output_dir={output_dir} ===")
 
     diagnostics: list[dict] = []
 
@@ -979,7 +961,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         check_required_files(data_dir, logger)
 
-        stock_ranking, stock_excluded = rank_stocks(date, config, data_dir, logger, diagnostics)
+        stock_ranking, stock_excluded = rank_stocks(date, config, data_dir, upd_dir, logger, diagnostics)
         
         save_csv(stock_ranking, output_dir / "stock_ranking.csv")
         save_csv(stock_excluded, output_dir / "stock_excluded.csv")

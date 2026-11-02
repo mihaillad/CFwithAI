@@ -41,6 +41,7 @@ CORP_SUBPORTFOLIO_COL = "Корпораты"
 # Утилиты
 # ============================================================================
 DEFAULT_DATA_DIR = Path("data/raw")
+DEFAULT_UPD_DIR = Path("data/upd")
 DEFAULT_OUTPUT_DIR = Path("data/output")
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 
@@ -206,112 +207,23 @@ def save_portfolio_units(df: pd.DataFrame, path: Path) -> None:
     for c in num_cols:
         out[c] = out[c].round().astype("Int64")
     out.to_csv(path, index=False, sep=";", encoding="utf-8")
-
-# def update_bond_portfolio_units(
-#     core_ofz_ranking: pd.DataFrame,
-#     long_ofz_ranking: pd.DataFrame,
-#     corp_ranking: pd.DataFrame,
-#     data_dir: Path,
-#     logger: logging.Logger,
-# ) -> None:
-#     """
-#     Обновляет матрицу субпортфелей целевыми весами облигаций из трёх рейтингов.
-#     """
-#     units_path = data_dir / "portfolio_units.csv"
-    
-#     try:
-#         matrix = load_portfolio_units(units_path, logger)
-        
-#         # Собираем словари {ISIN: target_weight_sleeve_pct} для каждого бакета
-#         def extract_weights(df: pd.DataFrame) -> dict:
-#             if df.empty:
-#                 return {}
-#             eligible = df[df.get("eligible") == True]
-#             if eligible.empty:
-#                 return {}
-#             weights = {}
-#             for _, row in eligible.iterrows():
-#                 isin = str(row.get("ISIN", "")).strip().upper()
-#                 weight = float(row.get("target_weight_sleeve_pct", 0) or 0)
-#                 if isin and weight > 0:
-#                     weights[isin] = weight
-#             return weights
-        
-#         core_ofz_weights = extract_weights(core_ofz_ranking)
-#         long_ofz_weights = extract_weights(long_ofz_ranking)
-#         corp_weights = extract_weights(corp_ranking)
-        
-#         # Обновляем три колонки
-#         matrix = update_subportfolio_column(matrix, CORE_OFZ_SUBPORTFOLIO_COL, core_ofz_weights, "bond", logger)
-#         matrix = update_subportfolio_column(matrix, LONG_OFZ_SUBPORTFOLIO_COL, long_ofz_weights, "bond", logger)
-#         matrix = update_subportfolio_column(matrix, CORP_SUBPORTFOLIO_COL, corp_weights, "bond", logger)
-        
-#         save_portfolio_units(matrix, units_path)
-        
-#         logger.info(
-#             f"Матрица обновлена: {len(matrix)} строк, "
-#             f"колонок-субпортфелей: {len([c for c in matrix.columns if c not in ('SECID','asset_type')])}, "
-#             f"заполнено: '{CORE_OFZ_SUBPORTFOLIO_COL}'={len(core_ofz_weights)}, "
-#             f"'{LONG_OFZ_SUBPORTFOLIO_COL}'={len(long_ofz_weights)}, "
-#             f"'{CORP_SUBPORTFOLIO_COL}'={len(corp_weights)}"
-#         )
-        
-#     except Exception as e:
-#         logger.error(f"Не удалось обновить матрицу субпортфелей: {e}")
-#         raise
     
 def update_bond_portfolio_units(core_ofz_ranking: pd.DataFrame,
                                 long_ofz_ranking: pd.DataFrame,
                                 corp_ranking: pd.DataFrame,
                                 data_dir: Path,
+                                upd_dir: Path,
                                 logger: logging.Logger) -> None:
     """Обновляет матрицу субпортфелей целевыми весами облигаций.
     Ключ строки — SECID (SU.../BYM...), отдельная колонка ISIN.
     Поддерживает миграцию старых строк, где в SECID лежал ISIN."""
-    units_path = data_dir / "portfolio_units.csv"
+    units_path = upd_dir / "portfolio_units.csv"
     try:
         matrix = load_portfolio_units(units_path, logger)
         if matrix.empty:
             matrix = pd.DataFrame(columns=["SECID", "asset_type"])
         matrix = matrix.copy()
         matrix["SECID"] = matrix["SECID"].astype(str).str.strip().str.upper()
-        # if "ISIN" not in matrix.columns:
-        #     matrix["ISIN"] = ""
-        # matrix["ISIN"] = matrix["ISIN"].fillna("").astype(str).str.strip().str.upper()
-
-        # 1. Маппинги из рейтингов (в них уже есть SECID + ISIN из справочников)
-        # isin_to_secid: dict = {}
-        # secid_to_isin: dict = {}
-        # for ranking in (core_ofz_ranking, long_ofz_ranking, corp_ranking):
-        #     if ranking.empty or "SECID" not in ranking.columns or "ISIN" not in ranking.columns:
-        #         continue
-        #     for _, r in ranking.iterrows():
-        #         secid = str(r.get("SECID", "")).strip().upper()
-                # isin = str(r.get("ISIN", "")).strip().upper()
-                # if secid and isin:
-                #     isin_to_secid[isin] = secid
-                #     secid_to_isin[secid] = isin
-        # logger.info(f"Матрица облигаций: маппинг SECID<->ISIN = {len(secid_to_isin)} бумаг")
-
-        # 2. Миграция legacy-строк: в SECID лежит ISIN
-        # migrated = 0
-        # for idx in matrix.index:
-        #     val = str(matrix.at[idx, "SECID"]).upper()
-        #     if len(val) >= 10 and (val.startswith("RU") or val.startswith("XS")):
-        #         real_secid = isin_to_secid.get(val, "")
-        #         if real_secid:
-        #             if not matrix.at[idx, "ISIN"]:
-        #                 matrix.at[idx, "ISIN"] = val
-        #             matrix.at[idx, "SECID"] = real_secid
-        #             migrated += 1
-        #         else:
-        #             logger.warning(f"Legacy ISIN {val}: SECID не найден в справочниках/рейтингах")
-        # if migrated:
-        #     logger.info(f"Матрица облигаций: мигрировано {migrated} строк")
-
-        # 3. Заполняем ISIN для всех известных облигаций
-        # known = matrix["SECID"].isin(secid_to_isin)
-        # matrix.loc[known, "ISIN"] = matrix.loc[known, "SECID"].map(secid_to_isin)
 
         # 4. Веса по SECID (не по ISIN!)
         def extract_weights(df: pd.DataFrame) -> dict:
@@ -465,7 +377,7 @@ def _issuer_key(name: str) -> str:
 # Загрузка справочника облигаций
 # ============================================================================
 def fetch_and_save_bonds_universe(data_dir: Path, logger: logging.Logger) -> None:
-    ofz_path = data_dir / "bonds_OFZ.csv"
+    ofz_path =   data_dir / "bonds_OFZ.csv"
     corps_path = data_dir / "bonds_CORPS.csv"
     
     if is_fresh(ofz_path, MAX_AGE_BONDS_SEC) and is_fresh(corps_path, MAX_AGE_BONDS_SEC):
@@ -775,7 +687,7 @@ def apply_water_filling(df_b: pd.DataFrame, share: float, cap: float, bond_sleev
 # ============================================================================
 # Основная функция рейтинга
 # ============================================================================
-def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, diagnostics: list):
+def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: logging.Logger, diagnostics: list):
     date_dt = pd.to_datetime(date)
     
     # 1. Загрузка ставки ЦБ
@@ -1053,7 +965,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, logger: logging.Logger, 
     
     # 8. Обновление матрицы субпортфелей
     try:
-        update_bond_portfolio_units(df_core_ofz, df_long_ofz, df_corp, data_dir, logger)
+        update_bond_portfolio_units(df_core_ofz, df_long_ofz, df_corp, data_dir, upd_dir, logger)
     except Exception as e:
         logger.error(f"Ошибка обновления матрицы: {e}")
         diagnostics.append({"code": "portfolio_units_update_failed", "details": str(e)})
@@ -1101,12 +1013,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--date", default="", help="Дата расчёта YYYY-MM-DD")
     ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Путь к config.yaml")
     ap.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR), help="Папка с входными CSV")
+    ap.add_argument("--upd-dir", default=str(DEFAULT_UPD_DIR), help="Папка с обновляемыми CSV")
     ap.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Папка для выходных CSV")
     args = ap.parse_args(argv)
     
     project_root = Path(__file__).resolve().parent.parent
     config_path = (Path(args.config) if Path(args.config).is_absolute() else project_root / args.config)
     data_dir = (Path(args.data_dir) if Path(args.data_dir).is_absolute() else project_root / args.data_dir)
+    upd_dir = (Path(args.upd_dir) if Path(args.upd_dir).is_absolute() else project_root / args.upd_dir)
     output_dir = (Path(args.output_dir) if Path(args.output_dir).is_absolute() else project_root / args.output_dir)
     
     config = load_config(config_path)
@@ -1128,7 +1042,7 @@ def main(argv: list[str] | None = None) -> int:
         
         # Рейтинг
         # Рейтинг (теперь возвращает 5 значений)
-        core_ofz_ranking, long_ofz_ranking, corp_ranking, bond_allocation, filter_stats,df_ofz_all,df_corp_all = rank_bonds(date, config, data_dir, logger, diagnostics)
+        core_ofz_ranking, long_ofz_ranking, corp_ranking, bond_allocation, filter_stats,df_ofz_all,df_corp_all = rank_bonds(date, config, data_dir, upd_dir, logger, diagnostics)
         
         
         # Сохранение
@@ -1139,15 +1053,6 @@ def main(argv: list[str] | None = None) -> int:
         save_csv(filter_stats, output_dir / "bond_filter_stats.csv") 
         save_csv(df_ofz_all, output_dir / "ofz_all_with_reasons.csv")
         save_csv(df_corp_all, output_dir / "corp_all_with_reasons.csv")
-        # Обновление матрицы субпортфелей
-        # try:
-        #     update_bond_portfolio_units(
-        #         core_ofz_ranking, long_ofz_ranking, corp_ranking,
-        #         data_dir, logger
-        #     )
-        # except Exception as e:
-        #     logger.error(f"Ошибка обновления матрицы: {e}")
-        #     diagnostics.append({"code": "portfolio_units_update_failed", "details": str(e)})
                 
         logger.info(f"core_ofz_ranking: {len(core_ofz_ranking)} строк")
         logger.info(f"long_ofz_ranking: {len(long_ofz_ranking)} строк")

@@ -3,7 +3,7 @@
 """
 Модуль 4. HTML-отчёт по рейтингам и портфелю.
 
-Собирает из data/output/*.csv и data/raw/portfolio_units.csv один самодостаточный HTML-файл.
+Собирает из data/output/*.csv и data/upd/portfolio_units.csv один самодостаточный HTML-файл.
 Входы:
   - stock_ranking.csv, ofz_ranking.csv, corp_ranking.csv (из output_dir)
   - portfolio_details.csv (из output_dir, формируется module3)
@@ -34,6 +34,7 @@ import yaml
 DEFAULT_INPUT_DIR = Path("data/output")
 DEFAULT_OUTPUT_DIR = Path("data/output")
 DEFAULT_RAW_DIR = Path("data/raw")
+DEFAULT_UPD_DIR = Path("data/upd")
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 
 LOGO_URL = "https://mybroker.storage.bcs.ru/FinInstrumentLogo/{isin}.png"
@@ -188,8 +189,8 @@ def load_name_map(raw_dir: Path, logger: logging.Logger) -> dict:
 # ============================================================================
 # Загрузка матрицы и расчёт сводки по субпортфелям
 # ============================================================================
-def load_portfolio_units(raw_dir: Path, logger: logging.Logger) -> pd.DataFrame:
-    path = raw_dir / "portfolio_units.csv"
+def load_portfolio_units(raw_dir: Path, upd_dir: Path, logger: logging.Logger) -> pd.DataFrame:
+    path = upd_dir / "portfolio_units.csv"
     if not path.exists():
         logger.warning(f"Матрица {path.name} не найдена — сводка по субпортфелям недоступна")
         return pd.DataFrame()
@@ -730,7 +731,7 @@ def build_html(date: str, panes: str, tab_labels: list[str], tab_ids: list[str])
 # ============================================================================
 # Основная функция
 # ============================================================================
-def build_report(date: str, input_dir: Path, output_dir: Path, raw_dir: Path,
+def build_report(date: str, input_dir: Path, output_dir: Path, upd_dir: Path, raw_dir: Path, 
                  logger: logging.Logger) -> Path:
     stocks = load_table(input_dir / "stock_ranking.csv", logger)
     corp = load_table(input_dir / "corp_ranking.csv", logger)
@@ -773,7 +774,7 @@ def build_report(date: str, input_dir: Path, output_dir: Path, raw_dir: Path,
     name_map = load_name_map(raw_dir, logger)
 
     # Матрица субпортфелей
-    matrix = load_portfolio_units(raw_dir, logger)
+    matrix = load_portfolio_units(raw_dir, upd_dir, logger)
 
     # Итоги портфеля (для вкладки "Сводно")
     total_value = 0.0
@@ -808,9 +809,11 @@ def build_report(date: str, input_dir: Path, output_dir: Path, raw_dir: Path,
     tab_ids = ["pane_portfolio", "pane_summary", "pane_stocks", "pane_ofz", "pane_corp"]
 
 
-
+    html = build_html(date, panes, tab_labels, tab_ids)
     out = output_dir / f"report_{date}.html"
-    out.write_text(build_html(date, panes, tab_labels, tab_ids), encoding="utf-8")
+    out.write_text(html, encoding="utf-8")
+    out = output_dir / f"index.html"
+    out.write_text(html, encoding="utf-8")
     logger.info(f"HTML-отчёт сохранён: {out}")
     return out
 
@@ -825,6 +828,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     ap.add_argument("--input-dir", default=str(DEFAULT_INPUT_DIR))
     ap.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
+    ap.add_argument("--upd-dir", default=str(DEFAULT_UPD_DIR))
     ap.add_argument("--raw-dir", default=str(DEFAULT_RAW_DIR))
     ap.add_argument("--open", action="store_true", help="Открыть отчёт в браузере")
     args = ap.parse_args(argv)
@@ -834,6 +838,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = resolve(args.config)
     input_dir = resolve(args.input_dir)
     output_dir = resolve(args.output_dir)
+    upd_dir = resolve(args.upd_dir)
     raw_dir = resolve(args.raw_dir)
 
     cfg = load_config(config_path)
@@ -846,7 +851,7 @@ def main(argv: list[str] | None = None) -> int:
     logger = setup_logging(date, output_dir)
     logger.info(f"=== Module 4 start: date={date} ===")
     try:
-        out = build_report(date, input_dir, output_dir, raw_dir, logger)
+        out = build_report(date, input_dir, output_dir, upd_dir, raw_dir, logger)
         # if args.open:
             # if sys.platform == "win32":
                 # import os

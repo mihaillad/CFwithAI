@@ -384,45 +384,82 @@ def fetch_moex_prices() -> pd.DataFrame:
     prices_df = md[["date", "SECID", "ISIN", "close", "volume_rub"]]
     return prices_df
 
-def fetch_cbr_rate() -> pd.DataFrame:
-    today = datetime.now()
-    d_from = today - timedelta(days=370)
-    body = (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        '<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
-        'xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
-        'xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body>'
-        '<KeyRate xmlns="http://web.cbr.ru/">'
-        f"<fromDate>{d_from:%Y-%m-%d}T00:00:00</fromDate>"
-        f"<ToDate>{today:%Y-%m-%d}T00:00:00</ToDate>"
-        "</KeyRate></soap:Body></soap:Envelope>"
-    )
-    headers = {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": '"http://web.cbr.ru/KeyRate"',
-    }
-    r = requests.post(CBR_URL, data=body.encode("utf-8"),
-                      headers=headers, timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
+# ============================================================================
+# Загрузка ставки ЦБ
+# ============================================================================
+# def fetch_cbr_rate() -> float:
+#     """Загружает текущую ключевую ставку ЦБ через SOAP."""
+#     today = datetime.now()
+#     d_from = today - timedelta(days=7)
+#     body = (
+#         '<?xml version="1.0" encoding="utf-8"?>'
+#         '<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+#         'xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
+#         'xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body>'
+#         '<KeyRate xmlns="http://web.cbr.ru/">'
+#         f'<fromDate>{d_from:%Y-%m-%d}T00:00:00</fromDate>'
+#         f'<ToDate>{today:%Y-%m-%d}T00:00:00</ToDate>'
+#         '</KeyRate></soap:Body></soap:Envelope>'
+#     )
+#     headers = {
+#         'Content-Type': 'text/xml; charset=utf-8',
+#         'SOAPAction': '"http://web.cbr.ru/KeyRate"'
+#     }
+#     r = requests.post(CBR_URL, data=body.encode('utf-8'), headers=headers, timeout=HTTP_TIMEOUT)
+#     r.raise_for_status()
+    
+#     import xml.etree.ElementTree as ET
+#     root = ET.fromstring(r.text)
+#     rates = []
+#     for el in root.iter():
+#         leaves = {c.tag.split("}")[-1]: (c.text or "").strip() for c in el if len(c) == 0}
+#         if len(leaves) >= 2:
+#             date = next((leaves[k] for k in ("DT", "Date", "date") if k in leaves), None)
+#             rate = next((leaves[k] for k in ("Rate", "BaseRate", "Value") if k in leaves), None)
+#             if date and rate:
+#                 try:
+#                     rates.append((date[:10], float(rate.replace(",", "."))))
+#                 except ValueError:
+#                     continue
+    
+#     if not rates:
+#         raise ValueError("Не удалось получить ставку ЦБ")
+    
+#     # Берём последнюю (самую свежую) ставку
+#     rates.sort(key=lambda x: x[0], reverse=True)
+#     return rates[0][1]
 
-    root = ET.fromstring(r.text)
-    rows = []
-    for el in root.iter():
-        leaves = {c.tag.split("}")[-1]: (c.text or "").strip()
-                  for c in el if len(c) == 0}
-        if len(leaves) < 2:
-            continue
-        date = next((leaves[k] for k in ("DT", "Date", "date") if k in leaves), None)
-        rate = next((leaves[k] for k in ("Rate", "BaseRate", "Value") if k in leaves), None)
-        if date and rate:
-            try:
-                rows.append({"date": date[:10],
-                             "rate_pct": float(rate.replace(",", "."))})
-            except ValueError:
-                continue
-    if not rows:
-        raise ValueError("В ответе ЦБ не найдено пар дата/ставка")
-    return pd.DataFrame(rows).drop_duplicates("date").sort_values("date")
+
+# def load_risk_free_rate(data_dir: Path, config: dict, logger: logging.Logger) -> float:
+#     """Загружает ставку ЦБ из файла или загружает с ЦБ."""
+#     rate_path = data_dir / "risk_free_rate.csv"
+#     max_age = config.get("risk_free_rate_max_age_sec", MAX_AGE_CBR)
+    
+#     if is_fresh(rate_path, max_age):
+#         df = pd.read_csv(rate_path, sep=";")
+#         if not df.empty:
+#             rate = float(df.iloc[-1]["rate_pct"])
+#             logger.info(f"Ставка ЦБ (из кэша): {rate:.2f}%")
+#             return rate
+    
+#     logger.info("Загрузка ставки ЦБ с cbr.ru...")
+#     try:
+#         rate = fetch_cbr_rate()
+#         # Сохраняем одну строку
+#         df = pd.DataFrame({"date": [datetime.now().strftime("%Y-%m-%d")], "rate_pct": [rate]})
+#         save_csv(df, rate_path)
+#         logger.info(f"Ставка ЦБ (загружена): {rate:.2f}%")
+#         return rate
+#     except Exception as e:
+#         logger.error(f"Ошибка загрузки ставки ЦБ: {e}")
+#         if rate_path.exists():
+#             df = pd.read_csv(rate_path, sep=";")
+#             if not df.empty:
+#                 rate = float(df.iloc[-1]["rate_pct"])
+#                 logger.warning(f"Используется устаревшая ставка: {rate:.2f}%")
+#                 return rate
+#         raise RuntimeError("Не удалось загрузить ставку ЦБ, и кэш отсутствует")
+
 
 
 def fetch_and_save_stocks_universe(data_dir: Path, logger: logging.Logger) -> None:
@@ -610,19 +647,24 @@ def rank_stocks(date: str, config: dict, data_dir: Path, upd_dir: Path,
         else:
             prices_df = pd.DataFrame(columns=['date', 'SECID', 'close', 'volume_rub'])
 
-    rate_path = data_dir / 'risk_free_rate.csv'
-    try:
-        cbr_df = fetch_cbr_rate()
-        cbr_df.to_csv(rate_path, index=False, encoding='utf-8')
-        logger.info(f"CBR rate loaded: {len(cbr_df)} records")
-    except Exception as e:
-        logger.error(f"CBR rate fetch failed: {e}")
-        diagnostics.append({'code': 'cbr_fetch_failed', 'details': str(e)})
-        if rate_path.exists():
-            cbr_df = pd.read_csv(rate_path)
-            logger.warning("Using cached risk_free_rate.csv")
-        else:
-            cbr_df = pd.DataFrame(columns=['date', 'rate_pct'])
+    # rate_path = data_dir / 'risk_free_rate.csv'
+    # try:
+    #     cbr_df = fetch_cbr_rate()
+    #     cbr_df.to_csv(rate_path, index=False, encoding='utf-8')
+    #     logger.info(f"CBR rate loaded: {len(cbr_df)} records")
+    # except Exception as e:
+    #     logger.error(f"CBR rate fetch failed: {e}")
+    #     diagnostics.append({'code': 'cbr_fetch_failed', 'details': str(e)})
+    #     if rate_path.exists():
+    #         cbr_df = pd.read_csv(rate_path)
+    #         logger.warning("Using cached risk_free_rate.csv")
+    #     else:
+    #         cbr_df = pd.DataFrame(columns=['date', 'rate_pct'])
+            
+    # 1. Загрузка ставки ЦБ
+    # risk_free_rate = load_risk_free_rate(data_dir, config, logger)
+    
+            
 
     # ------------------------------------------------------------------
     # Шаг 2. Загрузка остальных входных файлов

@@ -55,8 +55,8 @@ REC_COLS = ["date", "asset_type", "bucket", "SECID", "action", "reason_code", "r
 
 SNAP_COLS = ["date", "total_value", "stock_value", "bond_value", "bond_value_clean",
              "cash_value", "stock_share_pct", "bond_share_pct", "cash_share_pct",
-             "core_ofz_value", "core_ofz_share_pct",
-             "long_ofz_value", "long_ofz_share_pct",
+             "ofz_core_value", "ofz_core_share_pct",
+             "ofz_long_value", "ofz_long_share_pct",
              "corp_value", "corp_share_pct",
              "target_stock_pct", "target_bond_pct",
              "deviation_stock_pct", "deviation_bond_pct",
@@ -539,15 +539,15 @@ def load_stock_ranking(output_dir: Path, logger: logging.Logger) -> pd.DataFrame
 
 def load_bond_rankings(output_dir: Path, logger: logging.Logger) -> tuple:
     """
-    Загружает три рейтинга облигаций: core_ofz, long_ofz, corp.
+    Загружает три рейтинга облигаций: ofz_core, ofz_long, corp.
     Возвращает:
       - объединённый DataFrame всех рейтингов
       - словарь {ISIN: {bucket, target_weight_portfolio_pct, rank, eligible, ytm_gross_pct, current_yield_pct}}
     """
     rankings = {}
     for bucket, filename in [
-        ("core_ofz", "core_ofz_ranking.csv"),
-        ("long_ofz", "long_ofz_ranking.csv"),
+        ("ofz_core", "ofz_core_ranking.csv"),
+        ("ofz_long", "ofz_long_ranking.csv"),
         ("corp", "corp_ranking.csv"),
     ]:
         path = output_dir / filename
@@ -693,7 +693,7 @@ def evaluate_portfolio(date: str, config: dict, data_dir: Path, upd_dir: Path, o
         for _, r in stock_ranking.iterrows():
             dps_map[r["SECID"]] = _num(r.get("dps_reg_next"), 0.0)
 
-    # 7.5. Рейтинги облигаций (core_ofz, long_ofz, corp)
+    # 7.5. Рейтинги облигаций (ofz_core, ofz_long, corp)
     bond_rankings_df, bond_rating_info = load_bond_rankings(output_dir, logger)
     logger.info(f"Рейтинги облигаций: {len(bond_rating_info)} бумаг, бакеты: "
                 f"{set(v['bucket'] for v in bond_rating_info.values())}")
@@ -892,7 +892,7 @@ def evaluate_portfolio(date: str, config: dict, data_dir: Path, upd_dir: Path, o
 
     # Разбивка по бакетам облигаций
     bond_by_bucket = {}
-    for b in ["core_ofz", "long_ofz", "corp"]:
+    for b in ["ofz_core", "ofz_long", "corp"]:
         mask = (df_pos["asset_type"] == "bond") & (df_pos["bucket"] == b)
         val = df_pos.loc[mask, "current_value"].sum()
         bond_by_bucket[f"{b}_value"] = val
@@ -908,7 +908,7 @@ def evaluate_portfolio(date: str, config: dict, data_dir: Path, upd_dir: Path, o
         "stock_share_pct": stock_val / total_value * 100,
         "bond_share_pct": bond_val / total_value * 100,
         "cash_share_pct": cash_value / total_value * 100,
-        **bond_by_bucket,  # core_ofz_value, core_ofz_share_pct, long_ofz_value, ...
+        **bond_by_bucket,  # ofz_core_value, ofz_core_share_pct, ofz_long_value, ...
         "target_stock_pct": target_stock_pct,
         "target_bond_pct": target_bond_pct,
         "deviation_stock_pct": stock_val / total_value * 100 - target_stock_pct,
@@ -1122,8 +1122,8 @@ def main(argv: list = None) -> int:
             row = snapshot.iloc[0]
             logger.info(f"Total value: {row['total_value']:,.2f} RUB".replace(",", " "))
             logger.info(f"Stock: {row['stock_share_pct']:.2f}%, Bond: {row['bond_share_pct']:.2f}%, Cash: {row['cash_share_pct']:.2f}%")
-            logger.info(f"  Bonds by bucket: core_ofz={row.get('core_ofz_share_pct', 0):.2f}%, "
-                        f"long_ofz={row.get('long_ofz_share_pct', 0):.2f}%, "
+            logger.info(f"  Bonds by bucket: ofz_core={row.get('ofz_core_share_pct', 0):.2f}%, "
+                        f"ofz_long={row.get('ofz_long_share_pct', 0):.2f}%, "
                         f"corp={row.get('corp_share_pct', 0):.2f}%")
         
         if diagnostics:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Модуль 2. Рейтинг облигаций (core_ofz, long_ofz, corp).
+Модуль 2. Рейтинг облигаций (ofz_core, ofz_long, corp).
 
 Автономный запуск:
     python src/module2_bonds.py
@@ -33,8 +33,8 @@ MAX_AGE_BOND_PRICES = 3600  # 1 час для цен
 MAX_AGE_CBR = 86400  # 24 часа для ставки ЦБ
 
 # Матрица субпортфелей
-CORE_OFZ_SUBPORTFOLIO_COL = "ОФЗ"
-LONG_OFZ_SUBPORTFOLIO_COL = "Длинные ОФЗ"
+ofz_core_SUBPORTFOLIO_COL = "ОФЗ"
+ofz_long_SUBPORTFOLIO_COL = "Длинные ОФЗ"
 CORP_SUBPORTFOLIO_COL = "Корпораты"
 
 # ============================================================================
@@ -65,18 +65,18 @@ def load_config(config_path: Path) -> dict:
     defaults = {
         "date": "today",
         "bond_sleeve_pct": 35.0,
-        "core_ofz_share_pct": 30.0,
-        "long_ofz_share_pct": 10.0,
+        "ofz_core_share_pct": 30.0,
+        "ofz_long_share_pct": 10.0,
         "corp_share_pct": 60.0,
-        "core_ofz_min_years": 2.5,
-        "core_ofz_max_years": 3.0,
-        "core_ofz_price_min_pct": 85.0,
-        "core_ofz_price_max_pct": 105.0,
-        "long_ofz_min_years": 8.0,
-        "long_ofz_max_years": 12.0,
-        "long_ofz_price_min_pct": 50.0,
-        "long_ofz_price_max_pct": 105.0,
-        "long_ofz_top_n": 2,
+        "ofz_core_min_years": 2.5,
+        "ofz_core_max_years": 3.0,
+        "ofz_core_price_min_pct": 85.0,
+        "ofz_core_price_max_pct": 105.0,
+        "ofz_long_min_years": 8.0,
+        "ofz_long_max_years": 12.0,
+        "ofz_long_price_min_pct": 50.0,
+        "ofz_long_price_max_pct": 105.0,
+        "ofz_long_top_n": 2,
         "corp_ytm_min_spread_to_cbr": 5.0,
         "corp_ytm_max_multiplier": 3.0,
         "corp_price_min_pct": 60.0,
@@ -208,8 +208,8 @@ def save_portfolio_units(df: pd.DataFrame, path: Path) -> None:
         out[c] = out[c].round().astype("Int64")
     out.to_csv(path, index=False, sep=";", encoding="utf-8")
     
-def update_bond_portfolio_units(core_ofz_ranking: pd.DataFrame,
-                                long_ofz_ranking: pd.DataFrame,
+def update_bond_portfolio_units(ofz_core_ranking: pd.DataFrame,
+                                ofz_long_ranking: pd.DataFrame,
                                 corp_ranking: pd.DataFrame,
                                 data_dir: Path,
                                 upd_dir: Path,
@@ -263,8 +263,8 @@ def update_bond_portfolio_units(core_ofz_ranking: pd.DataFrame,
                     matrix = pd.concat([matrix, pd.DataFrame([new_row])], ignore_index=True)
             logger.info(f"Матрица: '{col_name}' заполнено {len(weights)} бумаг (ключ SECID)")
 
-        update_col(CORE_OFZ_SUBPORTFOLIO_COL, extract_weights(core_ofz_ranking))
-        update_col(LONG_OFZ_SUBPORTFOLIO_COL, extract_weights(long_ofz_ranking))
+        update_col(ofz_core_SUBPORTFOLIO_COL, extract_weights(ofz_core_ranking))
+        update_col(ofz_long_SUBPORTFOLIO_COL, extract_weights(ofz_long_ranking))
         update_col(CORP_SUBPORTFOLIO_COL, extract_weights(corp_ranking))
 
         # 5. Числовые колонки (ISIN — НЕ числовая!) и удаление пустых строк
@@ -338,7 +338,7 @@ def load_risk_free_rate(data_dir: Path, config: dict, logger: logging.Logger) ->
     max_age = config.get("risk_free_rate_max_age_sec", MAX_AGE_CBR)
     
     if is_fresh(rate_path, max_age):
-        df = pd.read_csv(rate_path)
+        df = pd.read_csv(rate_path, sep=";")
         if not df.empty:
             rate = float(df.iloc[-1]["rate_pct"])
             logger.info(f"Ставка ЦБ (из кэша): {rate:.2f}%")
@@ -355,7 +355,7 @@ def load_risk_free_rate(data_dir: Path, config: dict, logger: logging.Logger) ->
     except Exception as e:
         logger.error(f"Ошибка загрузки ставки ЦБ: {e}")
         if rate_path.exists():
-            df = pd.read_csv(rate_path)
+            df = pd.read_csv(rate_path, sep=";")
             if not df.empty:
                 rate = float(df.iloc[-1]["rate_pct"])
                 logger.warning(f"Используется устаревшая ставка: {rate:.2f}%")
@@ -373,9 +373,11 @@ def extract_issuer(shortname: str) -> str:
     # ([^\d-]+) — первая группа захвата: один или более символов, которые НЕ являются цифрой (\d) или дефисом (-)
     match = re.match(r'^([^\d-]+)', shortname)
     if match:
-        # Удаляем лишние пробелы на концах
+        # Удаляем пробелы
         return match.group(1).replace(" ", "")
     return shortname
+
+
 
 # ============================================================================
 # Загрузка справочника облигаций
@@ -556,28 +558,28 @@ def fetch_and_save_bond_prices(data_dir: Path, logger: logging.Logger) -> None:
     logger.info(f"Цены облигаций обновлены: {len(res_df)} записей")
     
     
-def build_isin_to_secid_map(data_dir: Path, logger: logging.Logger) -> dict:
-    """
-    Строит маппинг ISIN -> SECID из справочников bonds_OFZ.csv и bonds_CORPS.csv.
-    Используется для обогащения цен и рейтингов облигаций колонкой SECID.
-    """
-    isin_to_secid = {}
-    for fn in ("bonds_OFZ.csv", "bonds_CORPS.csv"):
-        p = data_dir / fn
-        if not p.exists():
-            continue
-        try:
-            df = read_csv_flex(p)
-            if "ISIN" in df.columns and "SECID" in df.columns:
-                for isin, secid in zip(df["ISIN"], df["SECID"]):
-                    isin_s = str(isin).strip().upper()
-                    secid_s = str(secid).strip().upper()
-                    if isin_s and secid_s:
-                        isin_to_secid[isin_s] = secid_s
-        except Exception as e:
-            logger.warning(f"Не удалось загрузить {fn} для маппинга ISIN->SECID: {e}")
-    logger.info(f"Маппинг ISIN->SECID построен: {len(isin_to_secid)} бумаг")
-    return isin_to_secid
+# def build_isin_to_secid_map(data_dir: Path, logger: logging.Logger) -> dict:
+#     """
+#     Строит маппинг ISIN -> SECID из справочников bonds_OFZ.csv и bonds_CORPS.csv.
+#     Используется для обогащения цен и рейтингов облигаций колонкой SECID.
+#     """
+#     isin_to_secid = {}
+#     for fn in ("bonds_OFZ.csv", "bonds_CORPS.csv"):
+#         p = data_dir / fn
+#         if not p.exists():
+#             continue
+#         try:
+#             df = read_csv_flex(p)
+#             if "ISIN" in df.columns and "SECID" in df.columns:
+#                 for isin, secid in zip(df["ISIN"], df["SECID"]):
+#                     isin_s = str(isin).strip().upper()
+#                     secid_s = str(secid).strip().upper()
+#                     if isin_s and secid_s:
+#                         isin_to_secid[isin_s] = secid_s
+#         except Exception as e:
+#             logger.warning(f"Не удалось загрузить {fn} для маппинга ISIN->SECID: {e}")
+#     logger.info(f"Маппинг ISIN->SECID построен: {len(isin_to_secid)} бумаг")
+#     return isin_to_secid
  
 
 # ============================================================================
@@ -720,9 +722,11 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
             LOTSIZE = 1
 
         isin = row["ISIN"]
+        SECID = row["SECID"]
+
         mat_date = pd.to_datetime(row.get("maturity_date"), errors="coerce")
         if pd.isna(mat_date):
-            ofz_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
+            ofz_results.append({"date": date,"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
                 "bond_type": "ofz", "maturity_date": "", "days_to_maturity": 0, "coupon_rate_pct": 0.0,
                 "price_pct": np.nan, "nkd_rub": np.nan, "current_yield_pct": 0.0, "ytm_gross_pct": np.nan,
                 "spread_to_cbr_pct": np.nan, "duration_years": np.nan, "bucket": "excluded", "eligible": False,
@@ -732,8 +736,8 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
             
         years_to_mat = (mat_date - date_dt).days / 365.0
         
-        if isin not in latest_prices.index:
-            ofz_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
+        if SECID not in latest_prices.index:
+            ofz_results.append({"date": date,"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
                 "bond_type": "ofz", "maturity_date": mat_date.strftime("%Y-%m-%d"), "days_to_maturity": int(years_to_mat * 365),
                 "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": np.nan, "nkd_rub": np.nan,
                 "current_yield_pct": 0.0, "ytm_gross_pct": np.nan, "spread_to_cbr_pct": np.nan, "duration_years": np.nan,
@@ -741,7 +745,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
                 "LOTSIZE": LOTSIZE, "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
             continue
             
-        p_row = latest_prices.loc[isin]
+        p_row = latest_prices.loc[SECID]
         price = p_row["price_pct"]
         ytm = p_row["ytm_pct"]
         
@@ -762,22 +766,22 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
             
         bucket = "excluded"
         if eligible:
-            if config["core_ofz_min_years"] <= years_to_mat <= config["core_ofz_max_years"]:
-                if not (config["core_ofz_price_min_pct"] <= price <= config["core_ofz_price_max_pct"]):
+            if config["ofz_core_min_years"] <= years_to_mat <= config["ofz_core_max_years"]:
+                if not (config["ofz_core_price_min_pct"] <= price <= config["ofz_core_price_max_pct"]):
                     eligible, exclusion_reason = False, "price_out_of_range"
                 else:
-                    bucket = "core_ofz"
-            elif config["long_ofz_min_years"] <= years_to_mat <= config["long_ofz_max_years"]:
-                if not (config["long_ofz_price_min_pct"] <= price <= config["long_ofz_price_max_pct"]):
+                    bucket = "ofz_core"
+            elif config["ofz_long_min_years"] <= years_to_mat <= config["ofz_long_max_years"]:
+                if not (config["ofz_long_price_min_pct"] <= price <= config["ofz_long_price_max_pct"]):
                     eligible, exclusion_reason = False, "price_out_of_range"
                 else:
-                    bucket = "long_ofz"
+                    bucket = "ofz_long"
             else:
                 eligible, exclusion_reason = False, "maturity_out_of_range"
                 
         current_yield = (row.get("coupon_rate_pct", 0.0) / (price / 100)) if price > 0 else 0.0
         
-        ofz_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
+        ofz_results.append({"date": date,"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": "RF",
             "bond_type": "ofz", "maturity_date": mat_date.strftime("%Y-%m-%d"), "days_to_maturity": int(years_to_mat * 365),
             "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": price, "nkd_rub": p_row.get("nkd_rub", 0.0),
             "current_yield_pct": current_yield, "ytm_gross_pct": ytm, "spread_to_cbr_pct": ytm - risk_free_rate if pd.notna(ytm) else np.nan,
@@ -789,20 +793,20 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     save_csv(df_ofz_all, Path("data\\output") / "df_ofz_all.csv")
     logger.info("ОФЗ: фильтр по обороту не применяется (безрисковый инструмент)")
     
-    df_core_ofz = df_ofz_all[df_ofz_all["bucket"] == "core_ofz"].copy()
-    df_long_ofz = df_ofz_all[df_ofz_all["bucket"] == "long_ofz"].copy()
+    df_ofz_core = df_ofz_all[df_ofz_all["bucket"] == "ofz_core"].copy()
+    df_ofz_long = df_ofz_all[df_ofz_all["bucket"] == "ofz_long"].copy()
     
-    df_core_ofz = df_core_ofz.sort_values("current_yield_pct", ascending=False).reset_index(drop=True)
-    df_core_ofz["rank"] = df_core_ofz.index + 1
+    df_ofz_core = df_ofz_core.sort_values("current_yield_pct", ascending=False).reset_index(drop=True)
+    df_ofz_core["rank"] = df_ofz_core.index + 1
     
-    df_long_ofz = df_long_ofz.sort_values("current_yield_pct", ascending=False).reset_index(drop=True)
-    df_long_ofz["rank"] = df_long_ofz.index + 1
-    long_ofz_top_n = config.get("long_ofz_top_n", 2)
-    df_long_ofz = df_long_ofz.head(long_ofz_top_n)
+    df_ofz_long = df_ofz_long.sort_values("current_yield_pct", ascending=False).reset_index(drop=True)
+    df_ofz_long["rank"] = df_ofz_long.index + 1
+    ofz_long_top_n = config.get("ofz_long_top_n", 2)
+    df_ofz_long = df_ofz_long.head(ofz_long_top_n)
     
     # Применяем water-filling для ОФЗ
-    df_core_ofz = apply_water_filling(df_core_ofz, config["core_ofz_share_pct"], config["issuer_limit_pct"], config["bond_sleeve_pct"])
-    df_long_ofz = apply_water_filling(df_long_ofz, config["long_ofz_share_pct"], config["issuer_limit_pct"], config["bond_sleeve_pct"])
+    df_ofz_core = apply_water_filling(df_ofz_core, config["ofz_core_share_pct"], config["issuer_limit_pct"], config["bond_sleeve_pct"])
+    df_ofz_long = apply_water_filling(df_ofz_long, config["ofz_long_share_pct"], config["issuer_limit_pct"], config["bond_sleeve_pct"])
 
     # ========================================================================
     # Обработка корпоратов
@@ -816,9 +820,10 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
             LOTSIZE = 1
 
         isin = row["ISIN"]
+        SECID = row["SECID"]
         mat_date = pd.to_datetime(row.get("maturity_date"), errors="coerce")
         if pd.isna(mat_date):
-            corp_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
+            corp_results.append({"date": date,"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
                 "bond_type": "corp", "maturity_date": "", "days_to_maturity": 0, "coupon_rate_pct": 0.0,
                 "price_pct": np.nan, "nkd_rub": np.nan, "current_yield_pct": 0.0, "ytm_gross_pct": np.nan,
                 "spread_to_cbr_pct": np.nan, "duration_years": np.nan, "bucket": "excluded", "eligible": False,
@@ -828,8 +833,8 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
             
         months_to_mat = (mat_date - date_dt).days / 30.44
         
-        if isin not in latest_prices.index:
-            corp_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
+        if SECID not in latest_prices.index:
+            corp_results.append({"date": date,"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
                 "bond_type": "corp", "maturity_date": mat_date.strftime("%Y-%m-%d"), "days_to_maturity": int(months_to_mat * 30.44),
                 "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": np.nan, "nkd_rub": np.nan,
                 "current_yield_pct": 0.0, "ytm_gross_pct": np.nan, "spread_to_cbr_pct": np.nan, "duration_years": np.nan,
@@ -837,7 +842,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
                 "LOTSIZE": LOTSIZE, "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
             continue
             
-        p_row = latest_prices.loc[isin]
+        p_row = latest_prices.loc[SECID]
         price = p_row["price_pct"]
         ytm = p_row["ytm_pct"]
         
@@ -872,7 +877,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
                 
         current_yield = (row.get("coupon_rate_pct", 0.0) / (price / 100)) if price > 0 else 0.0
         
-        corp_results.append({"date": date,"SECID": row.get("SECID", ""), "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
+        corp_results.append({"date": date,"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
             "bond_type": "corp", "maturity_date": mat_date.strftime("%Y-%m-%d"), "days_to_maturity": int(months_to_mat * 30.44),
             "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": price, "nkd_rub": p_row.get("nkd_rub", 0.0),
             "current_yield_pct": current_yield, "ytm_gross_pct": ytm, "spread_to_cbr_pct": ytm - risk_free_rate if pd.notna(ytm) else np.nan,
@@ -887,8 +892,8 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     
     # 4. Merge истории с корпоратами по SECID (нужно добавить SECID в df_corp_all для merge)
     # Для этого создадим маппинг ISIN -> SECID из справочника corps
-    isin_to_secid = dict(zip(corps["ISIN"], corps["SECID"]))
-    df_corp_all["SECID"] = df_corp_all["ISIN"].map(isin_to_secid)
+    # isin_to_secid = dict(zip(corps["ISIN"], corps["SECID"]))
+    # df_corp_all["SECID"] = df_corp_all["ISIN"].map(isin_to_secid)
     
     df_corp_all = df_corp_all.merge(df_hist_agg, on="SECID", how="left")
     # Гарантируем наличие колонок после merge
@@ -934,7 +939,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     # Диагностика и сводка
     # ========================================================================
     alloc = []
-    for b, df_b in [("core_ofz", df_core_ofz), ("long_ofz", df_long_ofz), ("corp", df_corp)]:
+    for b, df_b in [("ofz_core", df_ofz_core), ("ofz_long", df_ofz_long), ("corp", df_corp)]:
         mask = df_b["eligible"] if not df_b.empty else pd.Series([False])
         if mask.sum() > 0:
             alloc.append({
@@ -953,8 +958,8 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     for reason, count in ofz_reasons.items():
         filter_stats.append({"bucket": "ofz_excluded", "count": count, "reason": reason})
     filter_stats.append({"bucket": "ofz_volume_check", "count": 0, "reason": "skipped_for_ofz"})
-    filter_stats.append({"bucket": "core_ofz_final", "count": int((df_core_ofz["eligible"]).sum()), "reason": "passed"})
-    filter_stats.append({"bucket": "long_ofz_final", "count": int((df_long_ofz["eligible"]).sum()), "reason": "passed"})
+    filter_stats.append({"bucket": "ofz_core_final", "count": int((df_ofz_core["eligible"]).sum()), "reason": "passed"})
+    filter_stats.append({"bucket": "ofz_long_final", "count": int((df_ofz_long["eligible"]).sum()), "reason": "passed"})
     
     corp_total = len(df_corp_all)
     corp_reasons = df_corp_all[df_corp_all["eligible"] == False]["exclusion_reason"].value_counts().to_dict()
@@ -971,8 +976,8 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     logger.info(f"  ОФЗ всего: {ofz_total}")
     for reason, count in ofz_reasons.items():
         logger.info(f"    - {reason}: {count}")
-    logger.info(f"  core_ofz прошло: {int((df_core_ofz['eligible']).sum())}")
-    logger.info(f"  long_ofz прошло: {int((df_long_ofz['eligible']).sum())}")
+    logger.info(f"  ofz_core прошло: {int((df_ofz_core['eligible']).sum())}")
+    logger.info(f"  ofz_long прошло: {int((df_ofz_long['eligible']).sum())}")
     logger.info("  ОФЗ: фильтр по обороту пропущен")
     logger.info(f"  Корпораты всего: {corp_total}")
     for reason, count in corp_reasons.items():
@@ -982,12 +987,12 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     
     # 8. Обновление матрицы субпортфелей
     try:
-        update_bond_portfolio_units(df_core_ofz, df_long_ofz, df_corp, data_dir, upd_dir, logger)
+        update_bond_portfolio_units(df_ofz_core, df_ofz_long, df_corp, data_dir, upd_dir, logger)
     except Exception as e:
         logger.error(f"Ошибка обновления матрицы: {e}")
         diagnostics.append({"code": "portfolio_units_update_failed", "details": str(e)})
         
-    return df_core_ofz, df_long_ofz, df_corp, pd.DataFrame(alloc), df_filter_stats, df_ofz_all, df_corp_all
+    return df_ofz_core, df_ofz_long, df_corp, pd.DataFrame(alloc), df_filter_stats, df_ofz_all, df_corp_all
 
 
 
@@ -1000,21 +1005,6 @@ def _count_reasons(df: pd.DataFrame, reason_col: str = "exclusion_reason") -> di
         return {}
     return excluded[reason_col].value_counts().to_dict()
 
-# def enrich_with_secid(df: pd.DataFrame, isin_map: dict) -> pd.DataFrame:
-#     if df.empty or "ISIN" not in df.columns:
-#         return df
-#     out = df.copy()
-#     out["ISIN"] = out["ISIN"].astype(str).str.strip().str.upper()
-#     out["SECID"] = out["ISIN"].map(isin_map).fillna("")
-#     # Вставляем SECID сразу после ISIN
-#     cols = list(out.columns)
-#     if "SECID" in cols:
-#         isin_idx = cols.index("ISIN")
-#         cols.remove("SECID")
-#         cols.insert(isin_idx + 1, "SECID")
-#         out = out[cols]
-#     return out
-        
 # ============================================================================
 # Основная функция рейтинга
 # ============================================================================
@@ -1059,20 +1049,20 @@ def main(argv: list[str] | None = None) -> int:
         
         # Рейтинг
         # Рейтинг (теперь возвращает 5 значений)
-        core_ofz_ranking, long_ofz_ranking, corp_ranking, bond_allocation, filter_stats,df_ofz_all,df_corp_all = rank_bonds(date, config, data_dir, upd_dir, logger, diagnostics)
+        ofz_core_ranking, ofz_long_ranking, corp_ranking, bond_allocation, filter_stats,df_ofz_all,df_corp_all = rank_bonds(date, config, data_dir, upd_dir, logger, diagnostics)
         
         
         # Сохранение
-        save_csv(core_ofz_ranking, output_dir / "core_ofz_ranking.csv")
-        save_csv(long_ofz_ranking, output_dir / "long_ofz_ranking.csv")
+        save_csv(ofz_core_ranking, output_dir / "ofz_core_ranking.csv")
+        save_csv(ofz_long_ranking, output_dir / "ofz_long_ranking.csv")
         save_csv(corp_ranking, output_dir / "corp_ranking.csv")
         save_csv(bond_allocation, output_dir / "bond_allocation.csv")
         save_csv(filter_stats, output_dir / "bond_filter_stats.csv") 
         save_csv(df_ofz_all, output_dir / "ofz_all_with_reasons.csv")
         save_csv(df_corp_all, output_dir / "corp_all_with_reasons.csv")
                 
-        logger.info(f"core_ofz_ranking: {len(core_ofz_ranking)} строк")
-        logger.info(f"long_ofz_ranking: {len(long_ofz_ranking)} строк")
+        logger.info(f"ofz_core_ranking: {len(ofz_core_ranking)} строк")
+        logger.info(f"ofz_long_ranking: {len(ofz_long_ranking)} строк")
         logger.info(f"corp_ranking: {len(corp_ranking)} строк")
         
         if diagnostics:

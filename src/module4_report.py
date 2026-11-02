@@ -107,7 +107,7 @@ def setup_logging(date: str, output_dir: Path) -> logging.Logger:
     logger = logging.getLogger("module4")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
-    fh = logging.FileHandler(output_dir / f"report_{date}.log", mode="w", encoding="utf-8")
+    fh = logging.FileHandler(output_dir / f"report.log", mode="w", encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
@@ -737,15 +737,15 @@ def build_report(date: str, input_dir: Path, output_dir: Path, upd_dir: Path, ra
     corp = load_table(input_dir / "corp_ranking.csv", logger)
     portfolio = load_table(output_dir / "portfolio_details.csv", logger)
     # Загрузка двух рейтингов ОФЗ и объединение
-    core_ofz = load_table(input_dir / "core_ofz_ranking.csv", logger)
-    long_ofz = load_table(input_dir / "long_ofz_ranking.csv", logger)
+    ofz_core = load_table(input_dir / "ofz_core_ranking.csv", logger)
+    ofz_long = load_table(input_dir / "ofz_long_ranking.csv", logger)
 
     # Объединение в один DataFrame
     ofz_parts = []
-    if not core_ofz.empty:
-        ofz_parts.append(core_ofz)
-    if not long_ofz.empty:
-        ofz_parts.append(long_ofz)
+    if not ofz_core.empty:
+        ofz_parts.append(ofz_core)
+    if not ofz_long.empty:
+        ofz_parts.append(ofz_long)
 
     if ofz_parts:
         ofz = pd.concat(ofz_parts, ignore_index=True)
@@ -755,7 +755,7 @@ def build_report(date: str, input_dir: Path, output_dir: Path, upd_dir: Path, ra
             ofz = ofz.sort_values("current_yield_pct", ascending=False).reset_index(drop=True)
         # Перенумерация rank
         ofz["rank"] = range(1, len(ofz) + 1)
-        logger.info(f"ОФЗ объединены: core_ofz={len(core_ofz)}, long_ofz={len(long_ofz)}, итого={len(ofz)}")
+        logger.info(f"ОФЗ объединены: ofz_core={len(ofz_core)}, ofz_long={len(ofz_long)}, итого={len(ofz)}")
     else:
         ofz = pd.DataFrame()
     

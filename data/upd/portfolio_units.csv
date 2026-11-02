@@ -13,6 +13,7 @@ IRAO;stock;0;0;0;0;0;0;1;1
 KAZT;stock;8;0;0;0;0;0;0;0
 LEAS;stock;6;0;0;0;0;0;0;0
 LENT;stock;0;0;0;0;0;0;0;1
+<<<<<<< HEAD:data/upd/portfolio_units.csv
 LKOH;stock;8;0;0;0;0;0;1;1
 MDMG;stock;0;0;0;0;0;1;0;1
 MOEX;stock;0;0;0;0;0;0;1;0
@@ -20,6 +21,16 @@ MRSB;stock;10;0;0;0;0;0;0;0
 MTSS;stock;0;0;0;0;0;0;0;1
 NLMK;stock;0;0;0;0;0;1;0;0
 NVTK;stock;0;0;0;0;0;0;1;1
+=======
+LKOH;stock;8;0;0;0;0;0;2;2
+MDMG;stock;0;0;0;0;0;2;0;2
+MOEX;stock;0;0;0;0;0;0;2;0
+MRSB;stock;10;0;0;0;0;0;0;0
+MTSS;stock;0;0;0;0;0;0;0;2
+NLMK;stock;0;0;0;0;0;2;0;0
+NVTK;stock;0;0;0;0;0;0;2;2
+OGKB;stock;7;0;0;0;0;0;0;0
+>>>>>>> fabade91a23aa6c1ea9d4b933fa3ff30e6276d2b:data/raw/portfolio_units.csv
 OZON;stock;0;0;0;0;0;0;0;1
 PHOR;stock;8;0;0;0;0;0;0;1
 PMSB;stock;3;0;0;0;0;0;0;0
@@ -28,6 +39,7 @@ RENI;stock;4;0;0;0;0;0;0;1
 ROSN;stock;0;0;0;0;0;0;1;0
 RTKMP;stock;0;0;0;0;0;0;1;1
 RU000A0JXE06;bond;0;0;3;0;0;0;0;0
+<<<<<<< HEAD:data/upd/portfolio_units.csv
 RU000A0JXPG2;bond;0;0;3;0;0;0;0;0
 RZSB;stock;2;0;0;0;0;0;0;0
 SAGO;stock;10;0;0;0;0;0;0;0
@@ -36,6 +48,16 @@ SBERP;stock;0;0;0;0;0;1;1;1
 T;stock;5;0;0;0;0;0;0;1
 TATNP;stock;0;0;0;0;0;0;1;0
 TRNFP;stock;0;0;0;0;0;0;1;1
+=======
+RU000A0JXN21;bond;0;0;3;0;0;0;0;0
+RZSB;stock;2;0;0;0;0;0;0;0
+SAGOP;stock;10;0;0;0;0;0;0;0
+SBER;stock;0;0;0;0;0;2;2;2
+SBERP;stock;0;0;0;0;0;2;2;2
+T;stock;5;0;0;0;0;0;0;2
+TATNP;stock;0;0;0;0;0;0;2;0
+TRNFP;stock;0;0;0;0;0;0;2;2
+>>>>>>> fabade91a23aa6c1ea9d4b933fa3ff30e6276d2b:data/raw/portfolio_units.csv
 VLHZ;stock;4;0;0;0;0;0;0;0
 VSEH;stock;9;0;0;0;0;0;0;0
 VTBR;stock;0;0;0;0;1;0;0;0

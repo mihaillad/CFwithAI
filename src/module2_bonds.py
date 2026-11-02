@@ -362,16 +362,20 @@ def load_risk_free_rate(data_dir: Path, config: dict, logger: logging.Logger) ->
                 return rate
         raise RuntimeError("Не удалось загрузить ставку ЦБ, и кэш отсутствует")
 
-def _issuer_key(name: str) -> str:
+
+def extract_issuer(shortname: str) -> str:
     """
-    Извлекает ключ эмитента из названия выпуска.
-    SAMOLET P11 -> SAMOLET; ГАЗПРОМ 001Р-05 -> ГАЗПРОМ; ЛУКОЙЛ 10 -> ЛУКОЙЛ
+    Извлекает название эмитента из строки SHORTNAME.
+    Правило: берет символы от начала строки до первой цифры или дефиса.
     """
-    import re
-    s = str(name or "").strip().upper()
-    # Отрезаем последний токен, содержащий номер выпуска (P11, 001P-05, 32, 1P1)
-    s = re.sub(r"\s+[A-ZА-Я]*\d+[A-ZА-Я]*(?:-\d+)*$", "", s)
-    return re.sub(r"[\s\-–]+$", "", s)
+    # Регулярное выражение: 
+    # ^         — начало строки
+    # ([^\d-]+) — первая группа захвата: один или более символов, которые НЕ являются цифрой (\d) или дефисом (-)
+    match = re.match(r'^([^\d-]+)', shortname)
+    if match:
+        # Удаляем лишние пробелы на концах
+        return match.group(1).replace(" ", "")
+    return shortname
 
 # ============================================================================
 # Загрузка справочника облигаций
@@ -454,7 +458,7 @@ def fetch_and_save_bonds_universe(data_dir: Path, logger: logging.Logger) -> Non
         "ISIN": df_corps["ISIN"],
         "name": df_corps["SHORTNAME"],
         # Временный ключ эмитента: LATNAME (или SHORTNAME) без номера выпуска
-        "issuer": df_corps["LATNAME"].fillna(df_corps["SHORTNAME"]).map(_issuer_key),
+        "issuer": df_corps["LATNAME"].fillna(df_corps["SHORTNAME"]).map(extract_issuer),
         "maturity_date": df_corps["MATDATE"],
         "coupon_type": "fixed",
         "coupon_rate_pct": df_corps["COUPONPERCENT"],
@@ -709,6 +713,12 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     # ========================================================================
     ofz_results = []
     for _, row in ofz.iterrows():
+
+        # Безопасное извлечение LOTSIZE
+        LOTSIZE = row.get("LOTSIZE", 1)
+        if pd.isna(LOTSIZE):
+            LOTSIZE = 1
+
         isin = row["ISIN"]
         mat_date = pd.to_datetime(row.get("maturity_date"), errors="coerce")
         if pd.isna(mat_date):
@@ -716,7 +726,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
                 "bond_type": "ofz", "maturity_date": "", "days_to_maturity": 0, "coupon_rate_pct": 0.0,
                 "price_pct": np.nan, "nkd_rub": np.nan, "current_yield_pct": 0.0, "ytm_gross_pct": np.nan,
                 "spread_to_cbr_pct": np.nan, "duration_years": np.nan, "bucket": "excluded", "eligible": False,
-                "exclusion_reason": "no_maturity_date", "avg_daily_trades": 0.0, "LOTSIZE": int(row.get("LOTSIZE", 1)),
+                "exclusion_reason": "no_maturity_date", "avg_daily_trades": 0.0, "LOTSIZE": LOTSIZE,
                 "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
             continue
             
@@ -728,7 +738,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
                 "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": np.nan, "nkd_rub": np.nan,
                 "current_yield_pct": 0.0, "ytm_gross_pct": np.nan, "spread_to_cbr_pct": np.nan, "duration_years": np.nan,
                 "bucket": "excluded", "eligible": False, "exclusion_reason": "no_price", "avg_daily_trades": 0.0,
-                "LOTSIZE": int(row.get("LOTSIZE", 1)), "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
+                "LOTSIZE": LOTSIZE, "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
             continue
             
         p_row = latest_prices.loc[isin]
@@ -772,10 +782,11 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
             "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": price, "nkd_rub": p_row.get("nkd_rub", 0.0),
             "current_yield_pct": current_yield, "ytm_gross_pct": ytm, "spread_to_cbr_pct": ytm - risk_free_rate if pd.notna(ytm) else np.nan,
             "duration_years": p_row.get("duration_years", np.nan), "bucket": bucket, "eligible": eligible,
-            "exclusion_reason": exclusion_reason, "avg_daily_trades": 0.0, "LOTSIZE": int(row.get("LOTSIZE", 1)),
+            "exclusion_reason": exclusion_reason, "avg_daily_trades": 0.0, "LOTSIZE": LOTSIZE,
             "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
             
     df_ofz_all = pd.DataFrame(ofz_results)
+    save_csv(df_ofz_all, Path("data\\output") / "df_ofz_all.csv")
     logger.info("ОФЗ: фильтр по обороту не применяется (безрисковый инструмент)")
     
     df_core_ofz = df_ofz_all[df_ofz_all["bucket"] == "core_ofz"].copy()
@@ -798,6 +809,12 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     # ========================================================================
     corp_results = []
     for _, row in corps.iterrows():
+        
+        # Безопасное извлечение LOTSIZE
+        LOTSIZE = row.get("LOTSIZE", 1)
+        if pd.isna(LOTSIZE):
+            LOTSIZE = 1
+
         isin = row["ISIN"]
         mat_date = pd.to_datetime(row.get("maturity_date"), errors="coerce")
         if pd.isna(mat_date):
@@ -805,7 +822,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
                 "bond_type": "corp", "maturity_date": "", "days_to_maturity": 0, "coupon_rate_pct": 0.0,
                 "price_pct": np.nan, "nkd_rub": np.nan, "current_yield_pct": 0.0, "ytm_gross_pct": np.nan,
                 "spread_to_cbr_pct": np.nan, "duration_years": np.nan, "bucket": "excluded", "eligible": False,
-                "exclusion_reason": "no_maturity_date", "avg_daily_trades": 0.0, "LOTSIZE": int(row.get("LOTSIZE", 1)),
+                "exclusion_reason": "no_maturity_date", "avg_daily_trades": 0.0, "LOTSIZE": LOTSIZE,
                 "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
             continue
             
@@ -817,7 +834,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
                 "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": np.nan, "nkd_rub": np.nan,
                 "current_yield_pct": 0.0, "ytm_gross_pct": np.nan, "spread_to_cbr_pct": np.nan, "duration_years": np.nan,
                 "bucket": "excluded", "eligible": False, "exclusion_reason": "no_price", "avg_daily_trades": 0.0,
-                "LOTSIZE": int(row.get("LOTSIZE", 1)), "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
+                "LOTSIZE": LOTSIZE, "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
             continue
             
         p_row = latest_prices.loc[isin]
@@ -861,7 +878,7 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
             "current_yield_pct": current_yield, "ytm_gross_pct": ytm, "spread_to_cbr_pct": ytm - risk_free_rate if pd.notna(ytm) else np.nan,
             "duration_years": p_row.get("duration_years", np.nan), "bucket": "corp" if eligible else "excluded", 
             "eligible": eligible, "exclusion_reason": exclusion_reason, "avg_daily_trades": 0.0, 
-            "LOTSIZE": int(row.get("LOTSIZE", 1)), "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
+            "LOTSIZE": LOTSIZE, "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
             
     df_corp_all = pd.DataFrame(corp_results)
     

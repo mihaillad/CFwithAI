@@ -1,6 +1,6 @@
 /venv/
-/data/output/
 /data/raw/
+/data/output/
 *.log
 .vscode
 /TZ/

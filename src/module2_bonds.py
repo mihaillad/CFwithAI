@@ -65,30 +65,31 @@ def load_config(config_path: Path) -> dict:
     defaults = {
         "date": "today",
         "bond_sleeve_pct": 35.0,
-        "ofz_core_share_pct": 30.0,
-        "ofz_long_share_pct": 10.0,
+        "core_ofz_share_pct": 30.0,
+        "long_ofz_share_pct": 10.0,
         "corp_share_pct": 60.0,
-        "ofz_core_min_years": 2.5,
-        "ofz_core_max_years": 3.0,
-        "ofz_core_price_min_pct": 85.0,
-        "ofz_core_price_max_pct": 105.0,
-        "ofz_long_min_years": 8.0,
-        "ofz_long_max_years": 12.0,
-        "ofz_long_price_min_pct": 50.0,
-        "ofz_long_price_max_pct": 105.0,
-        "ofz_long_top_n": 2,
-        "corp_ytm_min_spread_to_cbr": 5.0,
+        "core_ofz_min_years": 1.0,
+        "core_ofz_max_years": 8.0,
+        "core_ofz_price_min_pct": 85.0,
+        "core_ofz_price_max_pct": 105.0,
+        "long_ofz_min_years": 8.0,
+        "long_ofz_max_years": 15.0,
+        "long_ofz_price_min_pct": 50.0,
+        "long_ofz_price_max_pct": 105.0,
+        "long_ofz_top_n": 2,
+        "corp_ytm_min_spread_to_cbr": 3.0,
         "corp_ytm_max_multiplier": 3.0,
         "corp_price_min_pct": 60.0,
         "corp_price_max_pct": 105.0,
         "corp_min_months": 12,
-        "corp_max_months": 40,
+        "corp_max_months": 84,
         "min_credit_rating": "A-",
         "issuer_limit_pct": 3.0,
-        "bond_min_volume_rub": 1_000_000.0,
+        "bond_min_volume_rub": 300000.0,
         "bond_avg_volume_days": 20,
         "bond_require_coupon": True,
         "bond_max_facevalue": 10000,
+        "corp_top_n": 10,
         "risk_free_rate_max_age_sec": 86400,
         "tax_rate_pct": 13.0,
     }
@@ -104,6 +105,91 @@ def save_csv(df: pd.DataFrame, path: Path, sep: str = ";", float_format: str = "
     df.to_csv(path, index=False, sep=sep, encoding="utf-8",
               float_format=float_format, date_format="%Y-%m-%d")
 
+
+
+def load_credit_rating(upd_dir: Path, logger: logging.Logger) -> pd.DataFrame:
+    """
+    Загружает файл кредитных рейтингов по эмитентам (issuer).
+    Убирает строки, у которых date старше 30 дней.
+    """
+    rating_path = upd_dir / "credit_rating.csv"
+
+    if not rating_path.exists():
+        logger.info("Файл credit_rating.csv не найден — создаю пустой")
+        df = pd.DataFrame(columns=["issuer", "credit_rating", "date"])
+        df.to_csv(rating_path, index=False, sep=";", encoding="utf-8")
+        logger.info("Файл создан")
+        return df
+
+    df = pd.read_csv(
+        rating_path, sep=";",
+        dtype={"issuer": str, "credit_rating": str},
+    )
+
+    if not df.empty and "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=30)
+        before = len(df)
+        df = df[df["date"] >= cutoff]
+        removed = before - len(df)
+        if removed > 0:
+            logger.info(f"credit_rating: удалено {removed} строк старше 30 дней")
+                                               
+            df["date"] = df["date"].dt.strftime("%Y-%m-%d")
+            df.to_csv(rating_path, index=False, sep=";", encoding="utf-8")
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    logger.info(f"Файл credit_rating.csv загружен: {len(df)} записей")
+    return df
+
+
+def smart_lab_credit_rating(secid: str, logger: logging.Logger) -> str | None:
+    """
+    Получает кредитный рейтинг через smart-lab.ru.
+    URL: https://smart-lab.ru/q/bonds/{SECID}
+    Возвращает строку рейтинга или None при ошибке.
+    """
+    url = f"https://smart-lab.ru/q/bonds/{secid}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
+
+    try:
+        r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+    except Exception as e:
+        logger.warning(f"Ошибка загрузки {secid} с smart-lab.ru: {e}")
+        return None
+
+    text = r.text
+    import re
+
+    # Ищем "Кредитный рейтинг" и значение после него
+    pattern = r'Кредитный рейтинг[^<]*<[^>]*>([^<]+)'
+    matches = re.findall(pattern, text)
+    if matches:
+        rating = matches[0].strip()
+        if rating and rating != "-":
+            logger.info(f"smart-lab.ru: {secid} -> {rating}")
+            return rating
+
+    # Альтернативный поиск
+    idx = text.find("Кредитный рейтинг")
+    if idx > -1:
+        # Берём кусок текста после
+        chunk = text[idx:idx+300]
+        # Ищем значение в теге
+        match = re.search(r'Кредитный рейтинг[^<]*<[^>]*>([^<]+)', chunk)
+        if match:
+            rating = match.group(1).strip()
+            if rating and rating != "-":
+                logger.info(f"smart-lab.ru: {secid} -> {rating}")
+                return rating
+
+    logger.warning(f"Рейтинг не найден {url}") 
+    return None
 
 
 def file_age(path: Path) -> float:
@@ -226,10 +312,10 @@ def update_bond_portfolio_units(ofz_core_ranking: pd.DataFrame,
         matrix["SECID"] = matrix["SECID"].astype(str).str.strip().str.upper()
 
         # 4. Веса по SECID (не по ISIN!)
-        def extract_weights(df: pd.DataFrame) -> dict:
-            if df.empty or "eligible" not in df.columns or "SECID" not in df.columns:
+        def extract_weights(df: pd.DataFrame, col: str = "eligible") -> dict:
+            if df.empty or "SECID" not in df.columns:
                 return {}
-            eligible = df[df["eligible"] == True]  # noqa: E712
+            eligible = df[df[col] == True]  # noqa: E712
             weights = {}
             for _, r in eligible.iterrows():
                 secid = str(r.get("SECID", "")).strip().upper()
@@ -265,7 +351,7 @@ def update_bond_portfolio_units(ofz_core_ranking: pd.DataFrame,
 
         update_col(ofz_core_SUBPORTFOLIO_COL, extract_weights(ofz_core_ranking))
         update_col(ofz_long_SUBPORTFOLIO_COL, extract_weights(ofz_long_ranking))
-        update_col(CORP_SUBPORTFOLIO_COL, extract_weights(corp_ranking))
+        update_col(CORP_SUBPORTFOLIO_COL, extract_weights(corp_ranking, "eligible"))
 
         # 5. Числовые колонки (ISIN — НЕ числовая!) и удаление пустых строк
         meta_cols = {"SECID", "asset_type", "ISIN"}
@@ -485,74 +571,88 @@ def fetch_and_save_bonds_universe(data_dir: Path, logger: logging.Logger) -> Non
 # ============================================================================
 def fetch_and_save_bond_prices(data_dir: Path, logger: logging.Logger) -> None:
     prices_path = data_dir / "bond_prices.csv"
-    logger.info("Загрузка цен облигаций с MOEX ISS...")
-    params = {
-        "iss.meta": "off",
-        "iss.only": "marketdata,securities",
-        "marketdata.columns": "SECID,BOARDID,LCURRENTPRICE,LAST,LCLOSEPRICE,YIELD,DURATION,VOLTODAY",
-        "securities.columns": "SECID,BOARDID,ISIN,ACCRUEDINT,FACEVALUE",
-    }
-    try:
-        r = requests.get(MOEX_BONDS_URL, params=params, timeout=HTTP_TIMEOUT)
-        r.raise_for_status()
-        payload = r.json()
-    except Exception as e:
-        logger.error(f"Ошибка загрузки цен: {e}")
-        if not prices_path.exists():
-            raise RuntimeError("Не удалось загрузить цены, и локальный файл отсутствует")
-        logger.warning("Используются устаревшие локальные цены")
-        return
+    logger.info("Загрузка цен облигаций с MOEX ISS (boardgroups)...")
 
-    if "marketdata" not in payload or "data" not in payload["marketdata"]:
-        raise RuntimeError("Некорректный ответ MOEX ISS: нет блока marketdata.data")
-    md_cols = payload["marketdata"]["columns"]
-    md_df = pd.DataFrame(payload["marketdata"]["data"], columns=md_cols)
+    # Три boardgroup покрывают все торги: 58=ТQOB+TQCB, 105=ТQOF, 245=ТQVB
+    BOARDGROUPS = [58, 105, 245]
+    all_data = []
 
-    sec_block = payload.get("securities")
-    if sec_block and "data" in sec_block and "columns" in sec_block:
-        sec_df = pd.DataFrame(sec_block["data"], columns=sec_block["columns"])
-    else:
-        logger.warning("В ответе ISS нет блока securities — НКД и ISIN будут пустыми")
-        sec_df = pd.DataFrame(columns=["SECID", "BOARDID", "ISIN", "ACCRUEDINT", "FACEVALUE"])
+    for bg in BOARDGROUPS:
+        url = f"{MOEX_BONDS_URL.replace('/securities.json', '')}/boardgroups/{bg}/securities.json"
+        params = {
+            "iss.meta": "off",
+            "iss.only": "marketdata",
+            "marketdata.columns": "SECID,MARKETPRICE,CLOSEPRICE,YIELD,DURATION,VOLTODAY,NUMTRADES"
+        }
+        try:
+            r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            payload = r.json()
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки boardgroup {bg}: {e}")
+            continue
 
-    for col in ["LCURRENTPRICE", "LAST", "LCLOSEPRICE", "YIELD", "DURATION", "VOLTODAY"]:
-        if col in md_df.columns:
-            md_df[col] = pd.to_numeric(md_df[col], errors="coerce")
+        if "marketdata" not in payload or "data" not in payload["marketdata"]:
+            continue
 
-    if "ACCRUEDINT" in sec_df.columns:
-        sec_df["ACCRUEDINT"] = pd.to_numeric(sec_df["ACCRUEDINT"], errors="coerce").fillna(0.0)
-    if "FACEVALUE" in sec_df.columns:
-        sec_df["FACEVALUE"] = pd.to_numeric(sec_df["FACEVALUE"], errors="coerce")
+        md = payload["marketdata"]
+        df = pd.DataFrame(md["data"], columns=md["columns"])
 
+        for col in ["CIK", "WAPRICE", "CLOSEPRICE", "YIELD", "DURATION", "VOLTODAY", "NUMTRADES"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        all_data.append(df)
+
+    if not all_data:
+        logger.error("MOEX вернул 0 записей по всем boardgroups")
+        raise RuntimeError("Не удалось загрузить цены облигаций с MOEX ISS")
+
+    md_df = pd.concat(all_data, ignore_index=True)
+    md_df = md_df.dropna(subset=["SECID"])
+    md_df = md_df.drop_duplicates(subset=["SECID"], keep="first")
+
+    # MARKETPRICE с boardgroups уже в % от номинала, используем напрямую
+    # Приоритет: MARKETPRICE (цена last known) → CLOSEPRICE
     md_df["price_pct"] = np.nan
-    for col in ["LCURRENTPRICE", "LAST", "LCLOSEPRICE"]:
+    for col in ["MARKETPRICE", "CLOSEPRICE"]:
         if col in md_df.columns:
             mask = md_df["price_pct"].isna() & md_df[col].notna() & (md_df[col] > 0)
+            # MARKETPRICE уже в % от номинала — используем без деления
             md_df.loc[mask, "price_pct"] = md_df.loc[mask, col]
 
-    md_df = md_df.dropna(subset=["SECID", "price_pct"])
-    md_df = md_df.drop_duplicates(subset=["SECID"], keep="first")
-    sec_df = sec_df.dropna(subset=["SECID"])
-    sec_df = sec_df.drop_duplicates(subset=["SECID"], keep="first")
+    # Фильтр: цена должна быть в разумном диапазоне (20-500% от номинала)
+    # Исключаем мусор: MARKETPRICE может быть не ценой для бумаг без торгов (YIELD=0)
+    md_df = md_df[(md_df["price_pct"] >= 20.0) | (md_df["price_pct"].isna())].copy()
 
-    merged = md_df.merge(sec_df[["SECID", "ISIN", "ACCRUEDINT"]], on="SECID", how="left")
+    if md_df["price_pct"].isna().all():
+        # Суббота/воскресенье/праздник — все цены null
+        logger.warning("MOEX вернул все null для цен (выходной/праздник)")
+        if prices_path.exists():
+            logger.info("Используется кэш за последнюю сессию")
+            return
+        else:
+            raise RuntimeError("MOEX вернул все null для цен облигаций — проверьте дату и доступность биржи")
+
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     res_df = pd.DataFrame({
         "date": today_str,
-        "SECID": merged["SECID"],
-        "ISIN": merged["ISIN"],
-        "price_pct": merged["price_pct"],
-        "nkd_rub": merged["ACCRUEDINT"].fillna(0.0),
-        "ytm_pct": merged["YIELD"],
-        "duration_years": merged["DURATION"],
-        "volume_rub": merged["VOLTODAY"].fillna(0.0)
+        "SECID": md_df["SECID"],
+        "ISIN": md_df["SECID"],  # ISIN будет заменён из справочников ниже
+        "price_pct": md_df["price_pct"],
+        "nkd_rub": 0.0,  # НКД не доступен через этот endpoint
+        "ytm_pct": md_df["YIELD"],
+        "duration_years": md_df["DURATION"],
+        "volume_rub": md_df["VOLTODAY"].fillna(0.0)
     })
 
-    if "BOARDID" in merged.columns:
-        res_df = res_df[merged["BOARDID"] != "SPOB"].copy()
     res_df = res_df.dropna(subset=["ISIN"])
     res_df = res_df.drop_duplicates(subset=["ISIN"], keep="first").sort_values("ISIN").reset_index(drop=True)
+
+    if res_df.empty:
+        logger.error("MOEX вернул 0 записей после фильтрации")
+        raise RuntimeError("MOEX вернул пустой набор данных после фильтрации")
 
     save_csv(res_df, prices_path)
     logger.info(f"Цены облигаций обновлены: {len(res_df)} записей")
@@ -707,9 +807,12 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     latest_prices = prices[prices["date"] <= date_dt].sort_values("date").groupby("SECID").tail(1).set_index("SECID")
     
     # Рейтинг-порядок
-    rating_order = {"AAA": 1, "AA+": 2, "AA": 3, "AA-": 4, "A+": 5, "A": 6, "A-": 7, "BBB+": 8, "BBB": 9, "BBB-": 10}
+    rating_order = {"AAA": 1, "AA+": 2, "AA-": 3, "AA": 4, "A+": 5, "A": 6, "A-": 7, "BBB+": 8, "BBB": 9, "BBB-": 10}
     min_rating_val = rating_order.get(config["min_credit_rating"], 99)
-    
+
+    # Загрузка кредитных рейтингов
+    credit_ratings = load_credit_rating(upd_dir, logger)
+
     # ========================================================================
     # Обработка ОФЗ
     # ========================================================================
@@ -760,19 +863,19 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
             coupon_rate = row.get("coupon_rate_pct", 0)
             if pd.isna(coupon_period) or coupon_period <= 0 or coupon_rate == 0:
                 eligible, exclusion_reason = False, "no_coupon"
-                
+
         if eligible and (pd.isna(ytm) or ytm < risk_free_rate):
             eligible, exclusion_reason = False, "ytm_below_risk_free"
-            
+
         bucket = "excluded"
         if eligible:
-            if config["ofz_core_min_years"] <= years_to_mat <= config["ofz_core_max_years"]:
-                if not (config["ofz_core_price_min_pct"] <= price <= config["ofz_core_price_max_pct"]):
+            if config["core_ofz_min_years"] <= years_to_mat <= config["core_ofz_max_years"]:
+                if not (config["core_ofz_price_min_pct"] <= price <= config["core_ofz_price_max_pct"]):
                     eligible, exclusion_reason = False, "price_out_of_range"
                 else:
                     bucket = "ofz_core"
-            elif config["ofz_long_min_years"] <= years_to_mat <= config["ofz_long_max_years"]:
-                if not (config["ofz_long_price_min_pct"] <= price <= config["ofz_long_price_max_pct"]):
+            elif config["long_ofz_min_years"] <= years_to_mat <= config["long_ofz_max_years"]:
+                if not (config["long_ofz_price_min_pct"] <= price <= config["long_ofz_price_max_pct"]):
                     eligible, exclusion_reason = False, "price_out_of_range"
                 else:
                     bucket = "ofz_long"
@@ -790,23 +893,24 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
             "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
             
     df_ofz_all = pd.DataFrame(ofz_results)
+    df_ofz_all = df_ofz_all.sort_values(["eligible", "current_yield_pct"], ascending=[False, False]).reset_index(drop=True)
     save_csv(df_ofz_all, Path("data\\output") / "df_ofz_all.csv")
     logger.info("ОФЗ: фильтр по обороту не применяется (безрисковый инструмент)")
     
     df_ofz_core = df_ofz_all[df_ofz_all["bucket"] == "ofz_core"].copy()
     df_ofz_long = df_ofz_all[df_ofz_all["bucket"] == "ofz_long"].copy()
     
-    df_ofz_core = df_ofz_core.sort_values("current_yield_pct", ascending=False).reset_index(drop=True)
+    df_ofz_core = df_ofz_core.sort_values(["eligible", "current_yield_pct"], ascending=[False, False]).reset_index(drop=True)
     df_ofz_core["rank"] = df_ofz_core.index + 1
     
-    df_ofz_long = df_ofz_long.sort_values("current_yield_pct", ascending=False).reset_index(drop=True)
+    df_ofz_long = df_ofz_long.sort_values(["eligible", "current_yield_pct"], ascending=[False, False]).reset_index(drop=True)
     df_ofz_long["rank"] = df_ofz_long.index + 1
-    ofz_long_top_n = config.get("ofz_long_top_n", 2)
+    ofz_long_top_n = config.get("long_ofz_top_n", 2)
     df_ofz_long = df_ofz_long.head(ofz_long_top_n)
-    
+
     # Применяем water-filling для ОФЗ
-    df_ofz_core = apply_water_filling(df_ofz_core, config["ofz_core_share_pct"], config["issuer_limit_pct"], config["bond_sleeve_pct"])
-    df_ofz_long = apply_water_filling(df_ofz_long, config["ofz_long_share_pct"], config["issuer_limit_pct"], config["bond_sleeve_pct"])
+    df_ofz_core = apply_water_filling(df_ofz_core, config["core_ofz_share_pct"], config["issuer_limit_pct"], config["bond_sleeve_pct"])
+    df_ofz_long = apply_water_filling(df_ofz_long, config["long_ofz_share_pct"], config["issuer_limit_pct"], config["bond_sleeve_pct"])
 
     # ========================================================================
     # Обработка корпоратов
@@ -823,67 +927,71 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
         SECID = row["SECID"]
         mat_date = pd.to_datetime(row.get("maturity_date"), errors="coerce")
         if pd.isna(mat_date):
-            corp_results.append({"date": date,"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
+            corp_results.append({"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
                 "bond_type": "corp", "maturity_date": "", "days_to_maturity": 0, "coupon_rate_pct": 0.0,
                 "price_pct": np.nan, "nkd_rub": np.nan, "current_yield_pct": 0.0, "ytm_gross_pct": np.nan,
                 "spread_to_cbr_pct": np.nan, "duration_years": np.nan, "bucket": "excluded", "eligible": False,
                 "exclusion_reason": "no_maturity_date", "avg_daily_trades": 0.0, "LOTSIZE": LOTSIZE,
-                "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
+                "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0,
+                "eligible_for_buy": False, "date": date})
             continue
-            
+
         months_to_mat = (mat_date - date_dt).days / 30.44
-        
+
         if SECID not in latest_prices.index:
-            corp_results.append({"date": date,"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
+            corp_results.append({"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
                 "bond_type": "corp", "maturity_date": mat_date.strftime("%Y-%m-%d"), "days_to_maturity": int(months_to_mat * 30.44),
                 "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": np.nan, "nkd_rub": np.nan,
                 "current_yield_pct": 0.0, "ytm_gross_pct": np.nan, "spread_to_cbr_pct": np.nan, "duration_years": np.nan,
                 "bucket": "excluded", "eligible": False, "exclusion_reason": "no_price", "avg_daily_trades": 0.0,
-                "LOTSIZE": LOTSIZE, "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
+                "LOTSIZE": LOTSIZE, "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0,
+                "eligible_for_buy": False, "date": date})
             continue
             
         p_row = latest_prices.loc[SECID]
         price = p_row["price_pct"]
         ytm = p_row["ytm_pct"]
-        
+
         exclusion_reason = ""
         eligible = True
-        
+
+        # Текущая доходность — до любых фильтров
+        current_yield = (row.get("coupon_rate_pct", 0.0) / (price / 100)) if price > 0 else 0.0
+
         if row.get("nominal", 1000) >= config["bond_max_facevalue"]:
             eligible, exclusion_reason = False, "facevalue_too_high"
-            
+
         if eligible and config["bond_require_coupon"]:
             coupon_period = row.get("coupon_period_days", 0)
             coupon_rate = row.get("coupon_rate_pct", 0)
             if pd.isna(coupon_period) or coupon_period <= 0 or coupon_rate == 0:
                 eligible, exclusion_reason = False, "no_coupon"
-                
-        # if eligible and not (config["corp_min_months"] <= months_to_mat <= config["corp_max_months"]):
-        #     eligible, exclusion_reason = False, "maturity_out_of_range"
-            
-        # Фильтр по цене отключён по вашему запросу (или можно раскомментировать при необходимости)
-        # if eligible and not (config["corp_price_min_pct"] <= price <= config["corp_price_max_pct"]):
-        #     eligible, exclusion_reason = False, "price_out_of_range"
-            
+
+        # Фильтр по YTM: spread_to_cbr и множитель
         ytm_min = risk_free_rate + config["corp_ytm_min_spread_to_cbr"]
         ytm_max = risk_free_rate * config["corp_ytm_max_multiplier"]
         if eligible and (pd.isna(ytm) or not (ytm_min <= ytm <= ytm_max)):
             eligible, exclusion_reason = False, "ytm_out_of_range"
-            
-        # if eligible:
-        #     rating_val = rating_order.get(str(row.get("credit_rating", "Unknown")), 99)
-        #     if rating_val > min_rating_val:
-        #         eligible, exclusion_reason = False, "low_rating"
-                
-        current_yield = (row.get("coupon_rate_pct", 0.0) / (price / 100)) if price > 0 else 0.0
-        
-        corp_results.append({"date": date,"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
+
+        # Получаем рейтинг из датафрейма
+        issuer_s = str(row.get("issuer", "")).strip().lower()
+        rating_row = credit_ratings[credit_ratings["issuer"].str.strip().str.lower() == issuer_s]
+        credit_rating_val = rating_row["credit_rating"].iloc[0] if not rating_row.empty else "+++"
+
+        # Проверка по минимальному рейтингу
+        if eligible and credit_rating_val != "+++":
+            rating_val = rating_order.get(credit_rating_val, 99)
+            if rating_val > min_rating_val:
+                eligible, exclusion_reason = False, "low_credit_rating"
+
+        corp_results.append({"SECID": SECID, "ISIN": isin, "name": row.get("name", ""), "issuer": row.get("issuer", ""),
             "bond_type": "corp", "maturity_date": mat_date.strftime("%Y-%m-%d"), "days_to_maturity": int(months_to_mat * 30.44),
             "coupon_rate_pct": row.get("coupon_rate_pct", 0.0), "price_pct": price, "nkd_rub": p_row.get("nkd_rub", 0.0),
             "current_yield_pct": current_yield, "ytm_gross_pct": ytm, "spread_to_cbr_pct": ytm - risk_free_rate if pd.notna(ytm) else np.nan,
-            "duration_years": p_row.get("duration_years", np.nan), "bucket": "corp" if eligible else "excluded", 
-            "eligible": eligible, "exclusion_reason": exclusion_reason, "avg_daily_trades": 0.0, 
-            "LOTSIZE": LOTSIZE, "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0})
+            "duration_years": p_row.get("duration_years", np.nan), "bucket": "corp" if eligible else "excluded",
+            "eligible": eligible, "exclusion_reason": exclusion_reason, "avg_daily_trades": 0.0,
+            "LOTSIZE": LOTSIZE, "target_weight_sleeve_pct": 0.0, "target_weight_portfolio_pct": 0.0,
+            "eligible_for_buy": False, "date": date, "credit_rating": credit_rating_val})
             
     df_corp_all = pd.DataFrame(corp_results)
     
@@ -895,17 +1003,20 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     # isin_to_secid = dict(zip(corps["ISIN"], corps["SECID"]))
     # df_corp_all["SECID"] = df_corp_all["ISIN"].map(isin_to_secid)
     
+    # 5. Фильтрация по объёму
+    min_vol = config["bond_min_volume_rub"]
+
+    # 4. Merge истории оборотов с корпоратами по SECID
     df_corp_all = df_corp_all.merge(df_hist_agg, on="SECID", how="left")
     # Гарантируем наличие колонок после merge
     if "avg_volume_rub" not in df_corp_all.columns:
         df_corp_all["avg_volume_rub"] = 0.0
     if "avg_daily_trades" not in df_corp_all.columns:
         df_corp_all["avg_daily_trades"] = 0.0
-    df_corp_all["avg_volume_rub"] = df_corp_all["avg_volume_rub"].fillna(0.0)
+    # Бумаги без истории оборотов — не отбраковывать, считаем volume равным лимиту
+    df_corp_all["avg_volume_rub"] = df_corp_all["avg_volume_rub"].fillna(min_vol)
     df_corp_all["avg_daily_trades"] = df_corp_all["avg_daily_trades"].fillna(0.0)
-    
-    # 5. Фильтрация по объёму
-    min_vol = config["bond_min_volume_rub"]
+
     mask_low_vol = (df_corp_all["eligible"] == True) & (df_corp_all["avg_volume_rub"] < min_vol)
     if mask_low_vol.any():
         df_corp_all.loc[mask_low_vol, "eligible"] = False
@@ -931,7 +1042,63 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     df_corp = df_corp_all[(df_corp_all["bucket"] == "corp") & (df_corp_all["eligible"])].copy()
     df_corp = df_corp.sort_values("current_yield_pct", ascending=False).reset_index(drop=True)
     df_corp["rank"] = df_corp.index + 1
+
+    # Топ-N позиций для покупки — ставим eligible=True
+    corp_top_n = config.get("corp_top_n", 10)
+    mask_top = df_corp.index < corp_top_n
+    df_corp.loc[~mask_top, "eligible"] = False
+    df_corp.loc[mask_top, "eligible"] = True
+
+    # Получаем рейтинги для топ-N позиций, если они отсутствуют ("+++")
+    top_n_mask = df_corp.index < corp_top_n
+    missing_ratings = df_corp[top_n_mask & (df_corp["credit_rating"] == "+++")]
     
+    if not missing_ratings.empty:
+        logger.info(f"Получаем рейтинги с smart-lab для {len(missing_ratings)} позиций топ-{corp_top_n}...")
+        for idx in missing_ratings.index:
+            secid = df_corp.loc[idx, "SECID"]
+            rating = smart_lab_credit_rating(secid, logger)
+            if rating:
+                df_corp.loc[idx, "credit_rating"] = rating
+            else:
+                rating = "+++"
+                
+            # Добавляем в датафрейм credit_ratings
+            new_row = pd.DataFrame([{
+                               
+                "issuer": df_corp.loc[idx, "issuer"],
+                "credit_rating": rating,
+                "date": datetime.now().strftime("%Y-%m-%d")
+            }])
+            credit_ratings = pd.concat([credit_ratings, new_row], ignore_index=True)
+
+        # Сохраняем обновлённые рейтинги
+        ratings_path = upd_dir / "credit_rating.csv"
+        out = credit_ratings.copy()
+        out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        out = out.drop_duplicates(subset=["issuer"], keep="last")
+        out.to_csv(ratings_path, index=False, sep=";", encoding="utf-8")
+        logger.info(f"Кредитные рейтинги сохранены: {len(credit_ratings)} записей")
+
+    # Сброс рангов только для eligible
+    df_corp = df_corp.sort_values("current_yield_pct", ascending=False).reset_index(drop=True)
+    df_corp["rank"] = df_corp.index + 1
+
+    # Reorder columns: новый порядок
+    cols_order = ["SECID", "ISIN", "eligible", "current_yield_pct", "coupon_rate_pct", "price_pct",
+                  "name", "issuer", "credit_rating",
+                  "avg_daily_trades_x", "avg_volume_rub", "avg_daily_trades_y",
+                  "avg_daily_trades", "rank", "bond_type", "maturity_date", "days_to_maturity",
+                  "nkd_rub", "ytm_gross_pct", "spread_to_cbr_pct", "duration_years",
+                  "bucket", "exclusion_reason", "LOTSIZE", "target_weight_sleeve_pct",
+                  "target_weight_portfolio_pct", "date"]
+    # Добавляем date в конец если есть, и убираем eligible_for_buy
+    if "eligible_for_buy" in df_corp.columns:
+        df_corp = df_corp.drop(columns=["eligible_for_buy"])
+    # Сохраняем только существующие колонки
+    cols_order = [c for c in cols_order if c in df_corp.columns]
+    df_corp = df_corp[cols_order]
+
     # 7. Применяем water-filling для корпоратов
     df_corp = apply_water_filling(df_corp, config["corp_share_pct"], config["issuer_limit_pct"], config["bond_sleeve_pct"])
     
@@ -939,12 +1106,13 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     # Диагностика и сводка
     # ========================================================================
     alloc = []
+    _share_key = {"ofz_core": "core_ofz_share_pct", "ofz_long": "long_ofz_share_pct", "corp": "corp_share_pct"}
     for b, df_b in [("ofz_core", df_ofz_core), ("ofz_long", df_ofz_long), ("corp", df_corp)]:
         mask = df_b["eligible"] if not df_b.empty else pd.Series([False])
         if mask.sum() > 0:
             alloc.append({
                 "date": date, "bucket": b,
-                "target_share_pct": config[f"{b}_share_pct"],
+                "target_share_pct": config[_share_key[b]],
                 "n_positions": int(mask.sum()),
                 "avg_ytm_gross_pct": df_b.loc[mask, "ytm_gross_pct"].mean(),
                 "avg_ytm_net_pct": df_b.loc[mask, "ytm_gross_pct"].mean() * (1 - config["tax_rate_pct"] / 100),
@@ -963,6 +1131,9 @@ def rank_bonds(date: str, config: dict, data_dir: Path, upd_dir: Path, logger: l
     
     corp_total = len(df_corp_all)
     corp_reasons = df_corp_all[df_corp_all["eligible"] == False]["exclusion_reason"].value_counts().to_dict()
+    # Переименовываем старую причину в новую для согласованности статистики
+    old_count = corp_reasons.pop("yield_below_risk_free", 0)
+    corp_reasons["ytm_out_of_range"] = corp_reasons.get("ytm_out_of_range", 0) + old_count
     filter_stats.append({"bucket": "corp_total", "count": corp_total, "reason": "all"})
     for reason, count in corp_reasons.items():
         filter_stats.append({"bucket": "corp_excluded", "count": count, "reason": reason})
@@ -1041,12 +1212,15 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(f"=== Module 2 start: date={date} ===")
     
     diagnostics: list[dict] = []
-    
+
     try:
+        # Загрузка кредитных рейтингов
+        credit_ratings = load_credit_rating(upd_dir, logger)
+
         # Загрузка данных
         fetch_and_save_bonds_universe(data_dir, logger)
         fetch_and_save_bond_prices(data_dir, logger)
-        
+
         # Рейтинг
         # Рейтинг (теперь возвращает 5 значений)
         ofz_core_ranking, ofz_long_ranking, corp_ranking, bond_allocation, filter_stats,df_ofz_all,df_corp_all = rank_bonds(date, config, data_dir, upd_dir, logger, diagnostics)

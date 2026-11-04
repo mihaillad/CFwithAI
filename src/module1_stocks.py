@@ -208,12 +208,12 @@ def update_subportfolio_column(
         secid_s = str(secid).strip().upper()
         mask = df["SECID"].astype(str).str.upper() == secid_s
         if mask.any():
-            df.loc[mask, col_name] = units
+            df.loc[mask, col_name] = int(units)
         else:
             new_row = pd.DataFrame([{
                 "SECID": secid_s,
                 "asset_type": "stock",
-                col_name: units,
+                col_name: int(units),
             }])
             df = pd.concat([df, new_row], ignore_index=True)
 
@@ -599,13 +599,33 @@ def generate_forecast_dividends(divs_df: pd.DataFrame, today: pd.Timestamp,
 
     return result
 
+# ============================================================================
+# Портфель (portfolio_details.csv)
+# ============================================================================
+
+def load_portfolio_secids(path: Path, logger: logging.Logger) -> set:
+    """
+    Загружает SECID из portfolio_details.csv — бумаги, которые уже есть в портфеле.
+    Если файла нет или он некорректен — возвращает пустой set.
+    """
+    if not path.exists():
+        logger.info(f"{path.name} не найден — приоритет бумагам из портфеля отключён")
+        return set()
+    df = read_csv_flex(path)
+    if df.empty or "SECID" not in df.columns:
+        logger.warning(f"{path.name} пуст или без колонки SECID — приоритет отключён")
+        return set()
+    result = set(df["SECID"].astype(str).str.strip().str.upper())
+    logger.info(f"{path.name}: в портфеле {len(result)} бумаг")
+    return result
+
 
 # ============================================================================
 # Основная функция модуля
 # ============================================================================
 
 def rank_stocks(date: str, config: dict, data_dir: Path, upd_dir: Path,
-                logger: logging.Logger, diagnostics: list):
+                logger: logging.Logger, diagnostics: list, output_dir: Path | None = None):
     date_dt = pd.to_datetime(date)
 
     # Загрузка стоп-листа (применяется ко всему рейтингу)
@@ -647,24 +667,7 @@ def rank_stocks(date: str, config: dict, data_dir: Path, upd_dir: Path,
         else:
             prices_df = pd.DataFrame(columns=['date', 'SECID', 'close', 'volume_rub'])
 
-    # rate_path = data_dir / 'risk_free_rate.csv'
-    # try:
-    #     cbr_df = fetch_cbr_rate()
-    #     cbr_df.to_csv(rate_path, index=False, encoding='utf-8')
-    #     logger.info(f"CBR rate loaded: {len(cbr_df)} records")
-    # except Exception as e:
-    #     logger.error(f"CBR rate fetch failed: {e}")
-    #     diagnostics.append({'code': 'cbr_fetch_failed', 'details': str(e)})
-    #     if rate_path.exists():
-    #         cbr_df = pd.read_csv(rate_path)
-    #         logger.warning("Using cached risk_free_rate.csv")
-    #     else:
-    #         cbr_df = pd.DataFrame(columns=['date', 'rate_pct'])
-            
-    # 1. Загрузка ставки ЦБ
-    # risk_free_rate = load_risk_free_rate(data_dir, config, logger)
-    
-            
+     
 
     # ------------------------------------------------------------------
     # Шаг 2. Загрузка остальных входных файлов
@@ -868,15 +871,28 @@ def rank_stocks(date: str, config: dict, data_dir: Path, upd_dir: Path,
                 })
         # ------------------------------------------------------------------
 
-        # Фильтрация пар обычка/преф: остаётся бумага с большей AY (при равенстве с большей DY)
+        # Фильтрация пар обычка/преф: остаётся бумага с большей AY (при равенстве с большей DY).
+        # Но если одна из бумаг пары уже есть в портфеле (portfolio_details.csv) — оставляем её.
+        if output_dir is None:
+            output_dir = DEFAULT_OUTPUT_DIR
+        portfolio_secids = load_portfolio_secids(output_dir / "portfolio_details.csv", logger)
+
         secs = set(df_res["SECID"])
         drop = []
         for s in secs:
             p = s + "P"
             if p in secs:
-                a = df_res[df_res["SECID"] == s].iloc[0]
-                b = df_res[df_res["SECID"] == p].iloc[0]
-                drop.append(p if (a["ay_pct"], a["dy_gross_pct"]) >= (b["ay_pct"], b["dy_gross_pct"]) else s)
+                s_in_pf = s in portfolio_secids
+                p_in_pf = p in portfolio_secids
+                if s_in_pf and not p_in_pf:
+                    drop.append(p)          # в портфеле обычка — убираем преф
+                elif p_in_pf and not s_in_pf:
+                    drop.append(s)          # в портфеле преф — убираем обычку
+                else:
+                    # Обе в портфеле или обе вне его — сравниваем по AY/DY
+                    a = df_res[df_res["SECID"] == s].iloc[0]
+                    b = df_res[df_res["SECID"] == p].iloc[0]
+                    drop.append(p if (a["ay_pct"], a["dy_gross_pct"]) >= (b["ay_pct"], b["dy_gross_pct"]) else s)
 
         if drop:
             logger.info(f"обычка и префы: убраны {', '.join(sorted(drop))}")
@@ -1003,7 +1019,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         check_required_files(data_dir, logger)
 
-        stock_ranking, stock_excluded = rank_stocks(date, config, data_dir, upd_dir, logger, diagnostics)
+        stock_ranking, stock_excluded = rank_stocks(date, config, data_dir, upd_dir, logger, diagnostics, output_dir)
         
         save_csv(stock_ranking, output_dir / "stock_ranking.csv")
         save_csv(stock_excluded, output_dir / "stock_excluded.csv")
